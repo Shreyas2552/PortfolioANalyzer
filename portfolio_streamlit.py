@@ -121,44 +121,44 @@ DEFAULT_TICKERS = ["NVDA", "AMZN", "GOOGL", "GEV", "CAT", "F", "PCAR", "JEPQ", "
 
 # ── ETF database ─────────────────────────────────────────────────────────────
 ETF_DB = {
-    "SPY":  {"expense":0.0945,"num_holdings":503,  "category":"S&P 500"},
-    "IVV":  {"expense":0.03,  "num_holdings":503,  "category":"S&P 500"},
-    "VOO":  {"expense":0.03,  "num_holdings":503,  "category":"S&P 500",             "multi_class_aum":True},
-    "VTI":  {"expense":0.03,  "num_holdings":3700, "category":"Total US Market",     "multi_class_aum":True},
-    "VUG":  {"expense":0.04,  "num_holdings":150,  "category":"Large Cap Growth",    "multi_class_aum":True},
-    "QQQ":  {"expense":0.20,  "num_holdings":101,  "category":"Nasdaq-100"},
-    "QQQM": {"expense":0.15,  "num_holdings":101,  "category":"Nasdaq-100"},
-    "IWF":  {"expense":0.19,  "num_holdings":330,  "category":"Large Cap Growth"},
-    "SPYG": {"expense":0.04,  "num_holdings":240,  "category":"Large Cap Growth"},
-    "MGK":  {"expense":0.07,  "num_holdings":69,   "category":"Mega Cap Growth"},
-    "VTV":  {"expense":0.04,  "num_holdings":340,  "category":"Large Cap Value",     "multi_class_aum":True},
-    "SCHD": {"expense":0.06,  "num_holdings":103,  "category":"Dividend Growth"},
-    "VIG":  {"expense":0.06,  "num_holdings":338,  "category":"Dividend Growth",     "multi_class_aum":True},
-    "DGRO": {"expense":0.08,  "num_holdings":420,  "category":"Dividend Growth"},
-    "DVY":  {"expense":0.38,  "num_holdings":100,  "category":"High Dividend"},
-    "VYM":  {"expense":0.06,  "num_holdings":555,  "category":"High Dividend Yield",  "multi_class_aum":True},
-    "JEPI": {"expense":0.35,  "num_holdings":101,  "category":"Covered Call / S&P 500 Income"},
-    "JEPQ": {"expense":0.35,  "num_holdings":93,   "category":"Covered Call / Nasdaq Income"},
-    "XYLD": {"expense":0.60,  "num_holdings":503,  "category":"Covered Call / S&P 500"},
-    "QYLD": {"expense":0.60,  "num_holdings":101,  "category":"Covered Call / Nasdaq"},
-    "XLK":  {"expense":0.10,  "num_holdings":67,   "category":"Technology Sector"},
-    "VGT":  {"expense":0.10,  "num_holdings":316,  "category":"Technology Sector",    "multi_class_aum":True},
-    "IYW":  {"expense":0.38,  "num_holdings":144,  "category":"U.S. Technology"},
-    "SMH":  {"expense":0.35,  "num_holdings":26,   "category":"Semiconductors"},
-    "SOXX": {"expense":0.35,  "num_holdings":30,   "category":"Semiconductors"},
-    "XLF":  {"expense":0.10,  "num_holdings":74,   "category":"Financials"},
-    "XLV":  {"expense":0.10,  "num_holdings":63,   "category":"Healthcare"},
-    "XLE":  {"expense":0.10,  "num_holdings":23,   "category":"Energy"},
-    "XLI":  {"expense":0.10,  "num_holdings":79,   "category":"Industrials"},
-    "VEA":  {"expense":0.05,  "num_holdings":3900, "category":"Developed Markets ex-US","multi_class_aum":True},
-    "VWO":  {"expense":0.08,  "num_holdings":5800, "category":"Emerging Markets",       "multi_class_aum":True},
-    "BND":  {"expense":0.03,  "num_holdings":10000,"category":"Total US Bond Market"},
-    "AGG":  {"expense":0.03,  "num_holdings":10000,"category":"Total US Bond Market"},
-    "TLT":  {"expense":0.15,  "num_holdings":30,   "category":"Long-Term Treasury"},
-    "GLD":  {"expense":0.40,  "num_holdings":1,    "category":"Gold"},
-    "IAU":  {"expense":0.25,  "num_holdings":1,    "category":"Gold"},
-    "VNQ":  {"expense":0.13,  "num_holdings":160,  "category":"US REITs",              "multi_class_aum":True},
-    "ARKK": {"expense":0.75,  "num_holdings":30,   "category":"Disruptive Innovation"},
+    "SPY":  {"expense":0.0945,"num_holdings":503,  "category":"S&P 500",              "beta_fallback":1.00},
+    "IVV":  {"expense":0.03,  "num_holdings":503,  "category":"S&P 500",              "beta_fallback":1.00},
+    "VOO":  {"expense":0.03,  "num_holdings":503,  "category":"S&P 500",              "multi_class_aum":True, "beta_fallback":1.00},
+    "VTI":  {"expense":0.03,  "num_holdings":3700, "category":"Total US Market",      "multi_class_aum":True, "beta_fallback":1.00},
+    "VUG":  {"expense":0.04,  "num_holdings":150,  "category":"Large Cap Growth",     "multi_class_aum":True, "beta_fallback":1.05},
+    "QQQ":  {"expense":0.20,  "num_holdings":101,  "category":"Nasdaq-100",           "beta_fallback":1.15},
+    "QQQM": {"expense":0.15,  "num_holdings":101,  "category":"Nasdaq-100",           "beta_fallback":1.15},
+    "IWF":  {"expense":0.19,  "num_holdings":330,  "category":"Large Cap Growth",     "beta_fallback":1.10},
+    "SPYG": {"expense":0.04,  "num_holdings":240,  "category":"Large Cap Growth",     "beta_fallback":1.05},
+    "MGK":  {"expense":0.07,  "num_holdings":69,   "category":"Mega Cap Growth",      "beta_fallback":1.10},
+    "VTV":  {"expense":0.04,  "num_holdings":340,  "category":"Large Cap Value",      "multi_class_aum":True, "beta_fallback":0.92},
+    "SCHD": {"expense":0.06,  "num_holdings":103,  "category":"Dividend Growth",      "beta_fallback":0.85},
+    "VIG":  {"expense":0.06,  "num_holdings":338,  "category":"Dividend Growth",      "multi_class_aum":True, "beta_fallback":0.85},
+    "DGRO": {"expense":0.08,  "num_holdings":420,  "category":"Dividend Growth",      "beta_fallback":0.85},
+    "DVY":  {"expense":0.38,  "num_holdings":100,  "category":"High Dividend",        "beta_fallback":0.80},
+    "VYM":  {"expense":0.06,  "num_holdings":555,  "category":"High Dividend Yield",  "multi_class_aum":True, "beta_fallback":0.82},
+    "JEPI": {"expense":0.35,  "num_holdings":101,  "category":"Covered Call / S&P 500 Income", "beta_fallback":0.55},
+    "JEPQ": {"expense":0.35,  "num_holdings":93,   "category":"Covered Call / Nasdaq Income",  "beta_fallback":0.62},
+    "XYLD": {"expense":0.60,  "num_holdings":503,  "category":"Covered Call / S&P 500",        "beta_fallback":0.60},
+    "QYLD": {"expense":0.60,  "num_holdings":101,  "category":"Covered Call / Nasdaq",         "beta_fallback":0.65},
+    "XLK":  {"expense":0.10,  "num_holdings":67,   "category":"Technology Sector",    "beta_fallback":1.20},
+    "VGT":  {"expense":0.10,  "num_holdings":316,  "category":"Technology Sector",    "multi_class_aum":True, "beta_fallback":1.20},
+    "IYW":  {"expense":0.38,  "num_holdings":144,  "category":"U.S. Technology",      "beta_fallback":1.20},
+    "SMH":  {"expense":0.35,  "num_holdings":26,   "category":"Semiconductors",       "beta_fallback":1.35},
+    "SOXX": {"expense":0.35,  "num_holdings":30,   "category":"Semiconductors",       "beta_fallback":1.35},
+    "XLF":  {"expense":0.10,  "num_holdings":74,   "category":"Financials",           "beta_fallback":1.10},
+    "XLV":  {"expense":0.10,  "num_holdings":63,   "category":"Healthcare",           "beta_fallback":0.72},
+    "XLE":  {"expense":0.10,  "num_holdings":23,   "category":"Energy",               "beta_fallback":1.05},
+    "XLI":  {"expense":0.10,  "num_holdings":79,   "category":"Industrials",          "beta_fallback":1.00},
+    "VEA":  {"expense":0.05,  "num_holdings":3900, "category":"Developed Markets ex-US","multi_class_aum":True,"beta_fallback":0.90},
+    "VWO":  {"expense":0.08,  "num_holdings":5800, "category":"Emerging Markets",     "multi_class_aum":True, "beta_fallback":0.85},
+    "BND":  {"expense":0.03,  "num_holdings":10000,"category":"Total US Bond Market", "beta_fallback":0.05},
+    "AGG":  {"expense":0.03,  "num_holdings":10000,"category":"Total US Bond Market", "beta_fallback":0.05},
+    "TLT":  {"expense":0.15,  "num_holdings":30,   "category":"Long-Term Treasury",   "beta_fallback":0.20},
+    "GLD":  {"expense":0.40,  "num_holdings":1,    "category":"Gold",                 "beta_fallback":0.08},
+    "IAU":  {"expense":0.25,  "num_holdings":1,    "category":"Gold",                 "beta_fallback":0.08},
+    "VNQ":  {"expense":0.13,  "num_holdings":160,  "category":"US REITs",             "multi_class_aum":True, "beta_fallback":0.85},
+    "ARKK": {"expense":0.75,  "num_holdings":30,   "category":"Disruptive Innovation","beta_fallback":1.55},
 }
 
 
@@ -345,6 +345,8 @@ def score_etf(ticker, price, wk52_hi_fh, wk52_lo_fh, db_entry, av_data, yf_data,
     av_beta = sf(av_data, "Beta")
     yf_beta = sf(yf_data, "beta")
     beta    = av_beta if av_beta is not None else yf_beta
+    if beta is None and db_entry:
+        beta = db_entry.get("beta_fallback")
     av_52hi = sf(av_data, "52WeekHigh")
     av_52lo = sf(av_data, "52WeekLow")
     yf_52hi = sf(yf_data, "52WeekHigh")
@@ -376,8 +378,16 @@ def score_etf(ticker, price, wk52_hi_fh, wk52_lo_fh, db_entry, av_data, yf_data,
          "note":  ((f"${aum_b:.1f}B (ETF share class)" if _multi_class else f"${aum_b:.1f}B")
                    if aum_b else "N/A")},
         {"name": "Dividend Yield",
-         "score": score_range(div_pct, 5, 0, True),
-         "note":  f"{div_pct:.2f}%" if div_pct else "None"},
+         "score": (score_range(div_pct, 5, 0, True)
+                   if any(x in category.lower() for x in
+                          ("dividend","income","covered call","bond","treasury",
+                           "reit","high yield","gold","commodity","silver"))
+                   else 5),
+         "note":  (f"{div_pct:.2f}%" if div_pct else "None")
+                  if any(x in category.lower() for x in
+                         ("dividend","income","covered call","bond","treasury",
+                          "reit","high yield","gold","commodity","silver"))
+                  else f"{div_pct:.2f}% (growth ETF — not scored)"},
         {"name": "YTD Total Return",
          "score": (score_range(ytd_pct, 10, -10, True) if ytd_pct is not None
                    else score_range(yr_ret, 20, 0, True)),
@@ -446,17 +456,31 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
     op_m      = sf(av, "OperatingMarginTTM")
     op_pct    = op_m * 100 if op_m is not None else None
 
+    _TIER_OVERRIDES = {
+        "AMZN": "Tech",  "SHOP": "Tech",  "EBAY": "Tech",  "ETSY": "Tech",  "MELI": "Tech",
+        "NFLX": "Tech",  "SPOT": "Tech",  "RBLX": "Tech",  "EA":   "Tech",  "TTWO": "Tech",
+        "UBER": "Tech",  "LYFT": "Tech",  "DASH": "Tech",  "ABNB": "Tech",
+        "BKNG": "Tech",  "EXPE": "Tech",  "TRIP": "Tech",
+        "PYPL": "Tech",  "XYZ":  "Tech",  "SQ":   "Tech",  "COIN": "Tech",  "SOFI": "Tech",
+        "AFRM": "Tech",  "UPST": "Tech",  "HOOD": "Tech",  "NU":   "Tech",  "BILL": "Tech",
+        "VEEV": "Tech",  "TDOC": "Tech",  "HIMS": "Tech",
+        "TSLA": "Tech",  "RIVN": "Tech",  "LCID": "Tech",
+        "GOOGL":"Tech",  "GOOG": "Tech",  "META": "Tech",  "SNAP": "Tech",  "PINS": "Tech",
+        "GEV":  "Industrial",  "FSLR": "Industrial",
+        "ENPH": "Tech",  "SEDG": "Tech",
+    }
     sec_lower = (sector or "").lower()
+    _override = _TIER_OVERRIDES.get(ticker.upper() if ticker else "")
     _TECH = ("technology","semiconductor","software","internet","cloud","saas",
              "artificial intelligence","communication","interactive","e-commerce",
              "electronic","information technology")
     _IND  = ("capital goods","automobile","transportation","energy","industrial",
              "manufacturing","machinery","defense","aerospace","electrical",
              "power","oil","mining","construction","steel","chemical")
-    if any(x in sec_lower for x in _TECH):
-        pe_good, pe_bad, gm_good, gm_bad, tier_label = 30, 80, 65, 25, "Tech"
-    elif any(x in sec_lower for x in _IND):
-        pe_good, pe_bad, gm_good, gm_bad, tier_label = 15, 40, 35, 5, "Industrial"
+    if _override == "Tech" or (not _override and any(x in sec_lower for x in _TECH)):
+        pe_good, pe_bad, gm_good, gm_bad, tier_label = 30, 80, 65, 25, "Tech" + (" (override)" if _override else "")
+    elif _override == "Industrial" or (not _override and any(x in sec_lower for x in _IND)):
+        pe_good, pe_bad, gm_good, gm_bad, tier_label = 15, 40, 35, 5, "Industrial" + (" (override)" if _override else "")
     else:
         pe_good, pe_bad, gm_good, gm_bad, tier_label = 20, 60, 55, 15, "Default"
 
@@ -493,7 +517,7 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
         div_score = score_range(payout_pct, 20, 85, False)
         div_note  = f"Yield {div_pct:.2f}%  Payout {payout_pct:.0f}%"
     else:
-        div_score = 7
+        div_score = 5   # neutral — absence of dividend is neither good nor bad
         div_note  = "No dividend" if div_pct == 0 else f"Token yield {div_pct:.2f}% (not scored)"
 
     # Analyst target signal
@@ -508,16 +532,26 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
     else:
         pt_signal = None
 
+    if blended_pe is None and net_pct is not None and net_pct < 0:
+        _pe_score = 2
+        pe_note   = "N/A — negative earnings [losses — penalised]"
+    else:
+        _pe_score = score_range(blended_pe, pe_good, pe_bad, False)
+
+    eg_score = score_range(eg_pct, 20, -10, True)
+    if eg_pct is not None and eg_pct > 200:
+        eg_score = min(eg_score, 6)
+
     criteria = [
-        {"name": "Valuation (P/E)",  "score": score_range(blended_pe, pe_good, pe_bad, False), "note": pe_note},
+        {"name": "Valuation (P/E)",  "score": _pe_score, "note": pe_note},
         {"name": "Price-to-Book",    "score": score_range(pb, 2, 50, False),                    "note": f"P/B {pb:.2f}x" if pb else "N/A"},
         {"name": "Margin-Adj P/S",   "score": score_range(ps, ps_good, ps_bad, False),          "note": f"P/S {ps:.2f}x" if ps else "N/A"},
         {"name": "EV / EBITDA",      "score": score_range(ev_ebitda, 15, 60, False),            "note": f"EV/EBITDA {ev_ebitda:.1f}x" if ev_ebitda else "N/A"},
         {"name": "Return on Equity", "score": score_range(roe_pct, 20, 0, True),                "note": f"ROE {roe_pct:.1f}%" if roe_pct is not None else "N/A"},
         {"name": "Gross Margin",     "score": score_range(gross_pct, gm_good, gm_bad, True),    "note": f"{gross_pct:.1f}%" if gross_pct is not None else "N/A"},
         {"name": "Net Margin",       "score": score_range(net_pct, 20, 3, True),                "note": f"{net_pct:.1f}%" if net_pct is not None else "N/A"},
-        {"name": "Earnings Growth",  "score": score_range(eg_pct, 20, -10, True),
-         "note": ((f"{eg_pct:+.1f}% TTM" + (" *one-time?" if eg_pct > 200 else ""))
+        {"name": "Earnings Growth",  "score": eg_score,
+         "note": ((f"{eg_pct:+.1f}% TTM" + (" *one-time? (capped 6/10)" if eg_pct > 200 else ""))
                   if eg_pct is not None else "N/A")},
         {"name": "Revenue Growth",   "score": score_range(rg_pct, 20, 0, True),                 "note": f"{rg_pct:+.1f}% TTM" if rg_pct is not None else "N/A"},
         {"name": "Dividend Safety",  "score": div_score,                                         "note": div_note},
