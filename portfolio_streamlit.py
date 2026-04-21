@@ -6,7 +6,7 @@ Deploy:       push to GitHub → connect at share.streamlit.io
 Mobile:       open the Streamlit Cloud URL on any device
 """
 
-import time, warnings, requests
+import time, warnings, requests, html as _html
 import streamlit as st
 
 warnings.filterwarnings("ignore")
@@ -61,7 +61,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .bar-high { background: #3fb950; }
 .bar-mid  { background: #d29922; }
 .bar-low  { background: #ff7b72; }
-.crit-score { color: #c9d1d9; font-weight: 600; width: 36px; text-align: right; font-family: monospace; }
+.crit-score { color: #c9d1d9; font-weight: 600; width: 36px; text-align: right; font-family: monospace; white-space: nowrap; }
 .crit-note  { color: #6e7681; font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
 
 /* Warning / caution */
@@ -95,6 +95,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .dq-low    { background:#2d0f0f; color:#ff7b72; border:1px solid #4a1515; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:600; }
 
 div[data-testid="stExpander"] { border: 1px solid #21262d !important; border-radius: 10px !important; }
+.dq-warn-inline { font-size: 0.72rem; color: #d29922; margin-top: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -331,6 +332,27 @@ class DataQuality:
         return " | ".join(self.notes)
 
 
+def _etf_div_label(category, div_pct):
+    """Return an accurate 'not scored' label based on the ETF's actual category."""
+    cat = category.lower()
+    if any(x in cat for x in ("s&p","nasdaq","total market","total us","broad")):
+        label = "index ETF"
+    elif any(x in cat for x in ("technology","semiconductor","financials","healthcare",
+                                 "energy","materials","utilities","industrials","sector")):
+        label = "sector ETF"
+    elif any(x in cat for x in ("developed","emerging","international","global","world",
+                                 "ex-us","ex us")):
+        label = "intl ETF"
+    elif any(x in cat for x in ("growth","value","blend","large cap","mid cap","small cap",
+                                 "mega cap")):
+        label = "equity ETF"
+    elif any(x in cat for x in ("innovation","thematic","disruptive")):
+        label = "thematic ETF"
+    else:
+        label = "non-income ETF"
+    return f"{div_pct:.2f}% ({label} — not scored)"
+
+
 def score_etf(ticker, price, wk52_hi_fh, wk52_lo_fh, db_entry, av_data, yf_data, dq):
     pe_h = (sf(yf_data, "trailingPE") or sf(av_data, "TrailingPE"))
     pe_source = "live yfinance" if sf(yf_data, "trailingPE") else (
@@ -377,17 +399,20 @@ def score_etf(ticker, price, wk52_hi_fh, wk52_lo_fh, db_entry, av_data, yf_data,
          "score": score_range(aum_b, 10, 0.5, True),
          "note":  ((f"${aum_b:.1f}B (ETF share class)" if _multi_class else f"${aum_b:.1f}B")
                    if aum_b else "N/A")},
+        # Dividend Yield:
+        #   - is_bond=True  → already scored as "Income Yield" above; neutral here to avoid double-count
+        #   - income/div category → score normally
+        #   - everything else (index, sector, intl) → neutral + accurate label
         {"name": "Dividend Yield",
-         "score": (score_range(div_pct, 5, 0, True)
+         "score": (5 if is_bond else
+                   score_range(div_pct, 5, 0, True)
                    if any(x in category.lower() for x in
-                          ("dividend","income","covered call","bond","treasury",
-                           "reit","high yield","gold","commodity","silver"))
+                          ("dividend","reit","high yield"))
                    else 5),
-         "note":  (f"{div_pct:.2f}%" if div_pct else "None")
-                  if any(x in category.lower() for x in
-                         ("dividend","income","covered call","bond","treasury",
-                          "reit","high yield","gold","commodity","silver"))
-                  else f"{div_pct:.2f}% (growth ETF — not scored)"},
+         "note":  ("See Income Yield" if is_bond else
+                   (f"{div_pct:.2f}%" if div_pct else "None")
+                   if any(x in category.lower() for x in ("dividend","reit","high yield"))
+                   else _etf_div_label(category, div_pct))},
         {"name": "YTD Total Return",
          "score": (score_range(ytd_pct, 10, -10, True) if ytd_pct is not None
                    else score_range(yr_ret, 20, 0, True)),
@@ -457,16 +482,44 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
     op_pct    = op_m * 100 if op_m is not None else None
 
     _TIER_OVERRIDES = {
+        # ── E-commerce / marketplace (Finnhub: "Broadline Retail", "Consumer Cyclical") ──
         "AMZN": "Tech",  "SHOP": "Tech",  "EBAY": "Tech",  "ETSY": "Tech",  "MELI": "Tech",
+        "JD":   "Tech",  "PDD":  "Tech",  "SE":   "Tech",
+        # ── Streaming / gaming (Finnhub: "Entertainment", "Media") ──
         "NFLX": "Tech",  "SPOT": "Tech",  "RBLX": "Tech",  "EA":   "Tech",  "TTWO": "Tech",
+        "ATVI": "Tech",  "MTCH": "Tech",
+        # ── Mobility / gig economy (Finnhub: "Transportation", "Consumer Cyclical") ──
         "UBER": "Tech",  "LYFT": "Tech",  "DASH": "Tech",  "ABNB": "Tech",
+        # ── Online travel (Finnhub: "Hotels, Restaurants & Leisure") ──
         "BKNG": "Tech",  "EXPE": "Tech",  "TRIP": "Tech",
+        # ── Fintech / payments (Finnhub: "Financial Services", "Capital Markets") ──
         "PYPL": "Tech",  "XYZ":  "Tech",  "SQ":   "Tech",  "COIN": "Tech",  "SOFI": "Tech",
         "AFRM": "Tech",  "UPST": "Tech",  "HOOD": "Tech",  "NU":   "Tech",  "BILL": "Tech",
-        "VEEV": "Tech",  "TDOC": "Tech",  "HIMS": "Tech",
+        "FOUR": "Tech",  "FLYW": "Tech",
+        # ── Payment networks — pure software economics, high P/E justified ──
+        "V":    "Tech",  "MA":   "Tech",  "FISV": "Tech",  "FIS":  "Tech",  "GPN":  "Tech",
+        "ADP":  "Tech",  "PAYX": "Tech",
+        # ── Healthcare SaaS / digital health ──
+        "VEEV": "Tech",  "TDOC": "Tech",  "HIMS": "Tech",  "DOCS": "Tech",
+        # ── Autos with software/tech valuation premium ──
         "TSLA": "Tech",  "RIVN": "Tech",  "LCID": "Tech",
+        # ── Communication services safety net (Finnhub sometimes returns "Media") ──
         "GOOGL":"Tech",  "GOOG": "Tech",  "META": "Tech",  "SNAP": "Tech",  "PINS": "Tech",
-        "GEV":  "Industrial",  "FSLR": "Industrial",
+        "ZM":   "Tech",  "TWLO": "Tech",  "DDOG": "Tech",
+        # ── Industrial overrides ──
+        # Heavy machinery (Finnhub may return "Trucks" or "Agriculture" missing keyword)
+        "PCAR": "Industrial",  "AGCO": "Industrial",  "OSK":  "Industrial",
+        "CMI":  "Industrial",  "GNRC": "Industrial",
+        # Aerospace / defense safety net
+        "GD":   "Industrial",  "NOC":  "Industrial",  "HII":  "Industrial",
+        "TDG":  "Industrial",  "HEI":  "Industrial",
+        # Energy equipment & services
+        "HAL":  "Industrial",  "BKR":  "Industrial",  "SLB":  "Industrial",
+        # Renewables manufacturing
+        "FSLR": "Industrial",  "RUN":  "Industrial",
+        # Power / electrical (GEV safety net)
+        "GEV":  "Industrial",  "ETN":  "Industrial",  "ACHR": "Industrial",
+        # Solar semiconductors (scored as Tech, not Industrial)
         "ENPH": "Tech",  "SEDG": "Tech",
     }
     sec_lower = (sector or "").lower()
@@ -687,25 +740,27 @@ def render_criteria(criteria):
         sc   = c["score"]
         pct  = sc / 10 * 100
         bc   = bar_color(sc)
-        note = c["note"][:40] if c["note"] else ""
-        rows += f"""
-        <div class="crit-row">
-            <span class="crit-name">{c['name']}</span>
-            <div class="crit-bar-bg">
-                <div class="crit-bar-fill {bc}" style="width:{pct}%"></div>
-            </div>
-            <span class="crit-score">{sc}/10</span>
-            <span class="crit-note">{note}</span>
-        </div>"""
+        note = _html.escape(str(c["note"])[:40]) if c["note"] else ""
+        rows += (f'<div class="crit-row">'
+                 f'<span class="crit-name">{_html.escape(c["name"])}</span>'
+                 f'<div class="crit-bar-bg">'
+                 f'<div class="crit-bar-fill {bc}" style="width:{pct}%"></div>'
+                 f'</div>'
+                 f'<span class="crit-score">{sc}/10</span>'
+                 f'<span class="crit-note">{note}</span>'
+                 f'</div>')
     st.markdown(rows, unsafe_allow_html=True)
 
 def render_metrics(metrics):
     skip = {"Data Quality", "_pt_signal"}
     chips = ""
     for k, v in metrics.items():
-        if k in skip or v == "N/A": continue
-        chips += f'<span class="metric-chip"><b>{k}</b> {v}</span>'
-    st.markdown(chips, unsafe_allow_html=True)
+        if k in skip or not v or v == "N/A": continue
+        chips += (f'<span class="metric-chip">'
+                  f'<b>{_html.escape(str(k))}</b> {_html.escape(str(v))}'
+                  f'</span>')
+    if chips:
+        st.markdown(chips, unsafe_allow_html=True)
 
 def render_pt_signal(metrics):
     sig = metrics.get("_pt_signal")
@@ -726,12 +781,21 @@ def render_card(r):
     chg_color = "#3fb950" if (chg or 0) >= 0 else "#ff7b72"
     dq = r.get("dq")
 
+    dq_quality = dq.quality if dq else "?"
+    dq_warn = ""
+    if dq_quality in ("LOW", "MEDIUM"):
+        dq_warn = (f'<div class="dq-warn-inline">⚠ Score based on partial data '
+                   f'({_html.escape(dq.summary) if dq and dq.summary else "some sources unavailable"})'
+                   f'</div>')
+    sector_html = ""
+    if r.get("sector") and r["sector"] != "—":
+        sector_html = f'&nbsp;·&nbsp; <span style="color:#8b949e;">{_html.escape(r["sector"][:30])}</span>'
     st.markdown(f"""
     <div class="score-card">
         <div style="display:flex; justify-content:space-between; align-items:flex-start;">
             <div>
-                <div class="ticker-label">{r['ticker']}</div>
-                <div class="name-label">{r['name']} · {r['type']} · {r['exchange']}</div>
+                <div class="ticker-label">{_html.escape(r['ticker'])}</div>
+                <div class="name-label">{_html.escape(r['name'])} · {r['type']} · {_html.escape(r['exchange'])}</div>
                 <div style="margin-top:6px;">{verdict_pill(v)}</div>
             </div>
             <div style="text-align:right;">
@@ -742,9 +806,10 @@ def render_card(r):
         </div>
         <div style="margin-top:10px; font-size:0.78rem; color:#8b949e;">
             <b style="color:#c9d1d9;">${r['price']:.2f}</b>
-            &nbsp;·&nbsp; Data {dq_badge(dq.quality if dq else '?')}
-            {('&nbsp;·&nbsp; <span style="color:#8b949e;">' + r["sector"][:30] + '</span>') if r.get("sector") and r["sector"] != '—' else ''}
+            &nbsp;·&nbsp; Data {dq_badge(dq_quality)}
+            {sector_html}
         </div>
+        {dq_warn}
     </div>
     """, unsafe_allow_html=True)
 
@@ -764,24 +829,40 @@ def render_card(r):
 st.markdown("## 📈 Portfolio Analyzer")
 st.markdown('<p style="color:#8b949e; margin-top:-12px; font-size:0.9rem;">Live fundamental scoring · Analyst targets · Sector-aware valuation</p>', unsafe_allow_html=True)
 
+# ── Load saved tickers from URL on first visit ────────────────────────────────
+if "tickers" not in st.session_state:
+    saved = st.query_params.get("t", "")
+    if saved:
+        st.session_state["tickers"] = [t.strip().upper() for t in saved.split(",") if t.strip()]
+    else:
+        st.session_state["tickers"] = DEFAULT_TICKERS
+
 # ── Ticker input ─────────────────────────────────────────────────────────────
-with st.expander("⚙️ Portfolio settings", expanded="tickers" not in st.session_state):
+with st.expander("⚙️ Portfolio settings", expanded="tickers" not in st.query_params):
     raw = st.text_area(
         "Tickers (one per line or comma-separated)",
         value="\n".join(st.session_state.get("tickers", DEFAULT_TICKERS)),
         height=180,
         help="Add or remove tickers. ETFs and stocks are detected automatically.",
     )
-    col1, col2 = st.columns([1, 3])
+    col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
         run_btn = st.button("▶ Analyze", type="primary", use_container_width=True)
     with col2:
-        st.caption("Results cached 30 min — click Analyze to force a refresh")
+        save_btn = st.button("💾 Save", use_container_width=True,
+                             help="Save your ticker list to the URL so it loads automatically next time")
+    with col3:
+        st.caption("Results cached 30 min · click Analyze to refresh")
+
+    if save_btn:
+        tickers_to_save = [t.strip().upper() for t in raw.replace(",", "\n").splitlines() if t.strip()]
+        st.session_state["tickers"] = tickers_to_save
+        st.query_params["t"] = ",".join(tickers_to_save)
+        st.success("✓ Saved! Bookmark this page URL to restore your portfolio on any device.", icon="🔖")
 
 if run_btn:
     tickers = [t.strip().upper() for t in raw.replace(",", "\n").splitlines() if t.strip()]
     st.session_state["tickers"] = tickers
-    # Clear cache for fresh data
     cached_fetch.clear()
 
 tickers = st.session_state.get("tickers", DEFAULT_TICKERS)

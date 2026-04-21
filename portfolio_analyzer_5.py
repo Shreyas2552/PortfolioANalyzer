@@ -376,6 +376,27 @@ class DataQuality:
 
 # ── ETF scoring ──────────────────────────────────────────────────────────────
 
+def _etf_div_label(category, div_pct):
+    """Return an accurate 'not scored' label based on the ETF's actual category."""
+    cat = category.lower()
+    if any(x in cat for x in ("s&p","nasdaq","total market","total us","broad")):
+        label = "index ETF"
+    elif any(x in cat for x in ("technology","semiconductor","financials","healthcare",
+                                 "energy","materials","utilities","industrials","sector")):
+        label = "sector ETF"
+    elif any(x in cat for x in ("developed","emerging","international","global","world",
+                                 "ex-us","ex us")):
+        label = "intl ETF"
+    elif any(x in cat for x in ("growth","value","blend","large cap","mid cap","small cap",
+                                 "mega cap")):
+        label = "equity ETF"
+    elif any(x in cat for x in ("innovation","thematic","disruptive")):
+        label = "thematic ETF"
+    else:
+        label = "non-income ETF"
+    return f"{div_pct:.2f}% ({label} — not scored)"
+
+
 def score_etf(ticker, price, wk52_hi_fh, wk52_lo_fh,
               db_entry, av_data, yf_data, dq):
     """
@@ -462,20 +483,19 @@ def score_etf(ticker, price, wk52_hi_fh, wk52_lo_fh,
          "note":  ((f"${aum_b:.1f}B (ETF share class)" if _multi_class else f"${aum_b:.1f}B")
                    if aum_b else "N/A")},
 
-        # Dividend yield only scored for income/dividend-focused ETFs.
-        # Growth, blend, sector, and international ETFs are scored neutral (5)
-        # to avoid unfairly penalising capital-appreciation vehicles like VUG, QQQ.
+        # Dividend Yield:
+        #   - is_bond=True  → already scored as "Income Yield"; neutral here to avoid double-count
+        #   - dividend/REIT category → score normally
+        #   - everything else (index, sector, intl) → neutral + accurate label via _etf_div_label
         {"name": "Dividend Yield",
-         "score": (score_range(div_pct, 5, 0, True)
-                   if any(x in category.lower() for x in
-                          ("dividend","income","covered call","bond","treasury",
-                           "reit","high yield","gold","commodity","silver"))
+         "score": (5 if is_bond else
+                   score_range(div_pct, 5, 0, True)
+                   if any(x in category.lower() for x in ("dividend","reit","high yield"))
                    else 5),
-         "note":  (f"{div_pct:.2f}%" if div_pct else "None")
-                  if any(x in category.lower() for x in
-                         ("dividend","income","covered call","bond","treasury",
-                          "reit","high yield","gold","commodity","silver"))
-                  else f"{div_pct:.2f}% (growth ETF — not scored)"},
+         "note":  ("See Income Yield" if is_bond else
+                   (f"{div_pct:.2f}%" if div_pct else "None")
+                   if any(x in category.lower() for x in ("dividend","reit","high yield"))
+                   else _etf_div_label(category, div_pct))},
 
         {"name": "YTD Total Return",
          "score": (score_range(ytd_pct, 10, -10, True) if ytd_pct is not None
@@ -565,57 +585,40 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
     # Tier overrides — hardcoded for tickers Finnhub commonly misclassifies.
     # Takes priority over the keyword scan below.
     _TIER_OVERRIDES = {
-        # E-commerce / marketplace (Finnhub: "Broadline Retail", "Consumer Cyclical")
-        "AMZN": "Tech",  # AWS = 60%+ of operating income; cloud+ads dominate valuation
-        "SHOP": "Tech",  # SaaS e-commerce platform
-        "EBAY": "Tech",  # Online marketplace
-        "ETSY": "Tech",  # Online marketplace
-        "MELI": "Tech",  # MercadoLibre — LatAm e-commerce + fintech
-        # Streaming / gaming (Finnhub: "Entertainment", "Media", "Communication")
-        "NFLX": "Tech",  # Pure software/streaming
-        "SPOT": "Tech",  # Spotify — audio streaming
-        "RBLX": "Tech",  # Roblox — gaming platform
-        "EA":   "Tech",  # Electronic Arts
-        "TTWO": "Tech",  # Take-Two Interactive
-        # Mobility / gig economy (Finnhub: "Transportation", "Consumer Cyclical")
-        "UBER": "Tech",  # Marketplace platform
-        "LYFT": "Tech",  # Marketplace platform
-        "DASH": "Tech",  # DoorDash — delivery marketplace
-        "ABNB": "Tech",  # Airbnb — home-sharing platform
-        # Online travel (Finnhub: "Hotels, Restaurants & Leisure")
-        "BKNG": "Tech",  # Booking Holdings — online travel platform
-        "EXPE": "Tech",  # Expedia — online travel
-        "TRIP": "Tech",  # TripAdvisor
-        # Fintech (Finnhub: "Financial Services", "Capital Markets")
-        "PYPL": "Tech",  # PayPal — digital payments
-        "XYZ":  "Tech",  # Block Inc (Square)
-        "SQ":   "Tech",  # Block Inc (old ticker)
-        "COIN": "Tech",  # Coinbase — crypto exchange
-        "SOFI": "Tech",  # SoFi — digital bank
-        "AFRM": "Tech",  # Affirm — BNPL
-        "UPST": "Tech",  # Upstart — AI lending
-        "HOOD": "Tech",  # Robinhood — trading platform
-        "NU":   "Tech",  # Nubank — digital bank
-        "BILL": "Tech",  # Bill.com — B2B fintech
-        # Healthcare SaaS / digital health
-        "VEEV": "Tech",  # Veeva — life sciences SaaS
-        "TDOC": "Tech",  # Teladoc — telemedicine
-        "HIMS": "Tech",  # Hims & Hers — digital health
-        # Autos with software/tech valuation premium
-        "TSLA": "Tech",  # Trades at tech multiples; software/AI/FSD narrative
-        "RIVN": "Tech",  # Rivian — EV software startup
-        "LCID": "Tech",  # Lucid — EV startup
-        # Communication services safety net (Finnhub sometimes returns "Media")
-        "GOOGL":"Tech",
-        "GOOG": "Tech",
-        "META": "Tech",
-        "SNAP": "Tech",
-        "PINS": "Tech",
-        # Industrial overrides
-        "GEV":  "Industrial",  # GE Vernova — power/electrical (safety net)
-        "FSLR": "Industrial",  # First Solar — solar manufacturing
-        "ENPH": "Tech",        # Enphase — semiconductor/software, not industrial
-        "SEDG": "Tech",        # SolarEdge — semiconductor
+        # ── E-commerce / marketplace (Finnhub: "Broadline Retail", "Consumer Cyclical") ──
+        "AMZN": "Tech",  "SHOP": "Tech",  "EBAY": "Tech",  "ETSY": "Tech",  "MELI": "Tech",
+        "JD":   "Tech",  "PDD":  "Tech",  "SE":   "Tech",
+        # ── Streaming / gaming (Finnhub: "Entertainment", "Media") ──
+        "NFLX": "Tech",  "SPOT": "Tech",  "RBLX": "Tech",  "EA":   "Tech",  "TTWO": "Tech",
+        "ATVI": "Tech",  "MTCH": "Tech",
+        # ── Mobility / gig economy (Finnhub: "Transportation", "Consumer Cyclical") ──
+        "UBER": "Tech",  "LYFT": "Tech",  "DASH": "Tech",  "ABNB": "Tech",
+        # ── Online travel (Finnhub: "Hotels, Restaurants & Leisure") ──
+        "BKNG": "Tech",  "EXPE": "Tech",  "TRIP": "Tech",
+        # ── Fintech / payments (Finnhub: "Financial Services", "Capital Markets") ──
+        "PYPL": "Tech",  "XYZ":  "Tech",  "SQ":   "Tech",  "COIN": "Tech",  "SOFI": "Tech",
+        "AFRM": "Tech",  "UPST": "Tech",  "HOOD": "Tech",  "NU":   "Tech",  "BILL": "Tech",
+        "FOUR": "Tech",  "FLYW": "Tech",
+        # ── Payment networks — pure software economics, high P/E justified ──
+        "V":    "Tech",  "MA":   "Tech",  "FISV": "Tech",  "FIS":  "Tech",  "GPN":  "Tech",
+        "ADP":  "Tech",  "PAYX": "Tech",
+        # ── Healthcare SaaS / digital health ──
+        "VEEV": "Tech",  "TDOC": "Tech",  "HIMS": "Tech",  "DOCS": "Tech",
+        # ── Autos with software/tech valuation premium ──
+        "TSLA": "Tech",  "RIVN": "Tech",  "LCID": "Tech",
+        # ── Communication services safety net (Finnhub sometimes returns "Media") ──
+        "GOOGL":"Tech",  "GOOG": "Tech",  "META": "Tech",  "SNAP": "Tech",  "PINS": "Tech",
+        "ZM":   "Tech",  "TWLO": "Tech",  "DDOG": "Tech",
+        # ── Industrial overrides ──
+        "PCAR": "Industrial",  "AGCO": "Industrial",  "OSK":  "Industrial",
+        "CMI":  "Industrial",  "GNRC": "Industrial",
+        "GD":   "Industrial",  "NOC":  "Industrial",  "HII":  "Industrial",
+        "TDG":  "Industrial",  "HEI":  "Industrial",
+        "HAL":  "Industrial",  "BKR":  "Industrial",  "SLB":  "Industrial",
+        "FSLR": "Industrial",  "RUN":  "Industrial",
+        "GEV":  "Industrial",  "ETN":  "Industrial",  "ACHR": "Industrial",
+        # ── Solar semiconductors scored as Tech ──
+        "ENPH": "Tech",  "SEDG": "Tech",
     }
     sec_lower = (sector or "").lower()
     _override = _TIER_OVERRIDES.get(ticker.upper() if ticker else "")
