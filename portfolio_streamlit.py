@@ -533,11 +533,13 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
              "manufacturing","machinery","defense","aerospace","electrical",
              "power","oil","mining","construction","steel","chemical")
     if _override == "Tech" or (not _override and any(x in sec_lower for x in _TECH)):
-        pe_good, pe_bad, gm_good, gm_bad, tier_label = 30, 80, 65, 25, "Tech" + (" (override)" if _override else "")
+        # Tightened bands: P/E 18x = excellent (was 30x), 60x = poor (was 80x)
+        # This prevents rich-but-quality tech stocks from scoring 10/10 by default
+        pe_good, pe_bad, gm_good, gm_bad, tier_label = 18, 60, 65, 25, "Tech" + (" (override)" if _override else "")
     elif _override == "Industrial" or (not _override and any(x in sec_lower for x in _IND)):
-        pe_good, pe_bad, gm_good, gm_bad, tier_label = 15, 40, 35, 5, "Industrial" + (" (override)" if _override else "")
+        pe_good, pe_bad, gm_good, gm_bad, tier_label = 10, 28, 35, 5,  "Industrial" + (" (override)" if _override else "")
     else:
-        pe_good, pe_bad, gm_good, gm_bad, tier_label = 20, 60, 55, 15, "Default"
+        pe_good, pe_bad, gm_good, gm_bad, tier_label = 13, 38, 55, 15, "Default"
 
     ps_good = max(3.0, min(12.0, 3.0 + max(0.0, (gross_pct or 0) - 20.0) / 40.0 * 9.0))
     ps_bad  = ps_good * 4
@@ -597,23 +599,33 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
     if eg_pct is not None and eg_pct > 200:
         eg_score = min(eg_score, 6)
 
+    # 52W position: low % of range = better buy opportunity
+    if wk52_hi and wk52_lo and wk52_hi > wk52_lo and price:
+        pos_pct   = (price - wk52_lo) / (wk52_hi - wk52_lo) * 100
+        pos_score = score_range(pos_pct, 30, 75, False)
+        pos_note  = f"{pos_pct:.0f}% of range (${wk52_lo:.0f}–${wk52_hi:.0f})"
+    else:
+        pos_pct, pos_score, pos_note = None, 5, "N/A"
+
     criteria = [
-        {"name": "Valuation (P/E)",  "score": _pe_score, "note": pe_note},
-        {"name": "Price-to-Book",    "score": score_range(pb, 2, 50, False),                    "note": f"P/B {pb:.2f}x" if pb else "N/A"},
-        {"name": "Margin-Adj P/S",   "score": score_range(ps, ps_good, ps_bad, False),          "note": f"P/S {ps:.2f}x" if ps else "N/A"},
-        {"name": "EV / EBITDA",      "score": score_range(ev_ebitda, 15, 60, False),            "note": f"EV/EBITDA {ev_ebitda:.1f}x" if ev_ebitda else "N/A"},
-        {"name": "Return on Equity", "score": score_range(roe_pct, 20, 0, True),                "note": f"ROE {roe_pct:.1f}%" if roe_pct is not None else "N/A"},
-        {"name": "Gross Margin",     "score": score_range(gross_pct, gm_good, gm_bad, True),    "note": f"{gross_pct:.1f}%" if gross_pct is not None else "N/A"},
-        {"name": "Net Margin",       "score": score_range(net_pct, 20, 3, True),                "note": f"{net_pct:.1f}%" if net_pct is not None else "N/A"},
+        {"name": "Valuation (P/E)",  "score": _pe_score,                                                        "note": pe_note},
+        {"name": "Price-to-Book",    "score": score_range(pb, 2, 50, False),                                    "note": f"P/B {pb:.2f}x" if pb else "N/A"},
+        {"name": "Margin-Adj P/S",   "score": score_range(ps, ps_good, ps_bad, False),                          "note": f"P/S {ps:.2f}x" if ps else "N/A"},
+        {"name": "EV / EBITDA",      "score": score_range(ev_ebitda, 8, 40, False),                             "note": f"EV/EBITDA {ev_ebitda:.1f}x" if ev_ebitda else "N/A"},
+        {"name": "Return on Equity", "score": score_range(roe_pct, 20, 0, True),                                "note": f"ROE {roe_pct:.1f}%" if roe_pct is not None else "N/A"},
+        {"name": "Gross Margin",     "score": score_range(gross_pct, gm_good, gm_bad, True),                    "note": f"{gross_pct:.1f}%" if gross_pct is not None else "N/A"},
+        {"name": "Net Margin",       "score": score_range(net_pct, 20, 3, True),                                "note": f"{net_pct:.1f}%" if net_pct is not None else "N/A"},
         {"name": "Earnings Growth",  "score": eg_score,
          "note": ((f"{eg_pct:+.1f}% TTM" + (" *one-time? (capped 6/10)" if eg_pct > 200 else ""))
                   if eg_pct is not None else "N/A")},
-        {"name": "Revenue Growth",   "score": score_range(rg_pct, 20, 0, True),                 "note": f"{rg_pct:+.1f}% TTM" if rg_pct is not None else "N/A"},
-        {"name": "Dividend Safety",  "score": div_score,                                         "note": div_note},
-        {"name": "Analyst Target",   "score": score_range(upside_pct, 15, -15, True),           "note": pt_note},
+        {"name": "Revenue Growth",   "score": score_range(rg_pct, 20, 0, True),                                 "note": f"{rg_pct:+.1f}% TTM" if rg_pct is not None else "N/A"},
+        {"name": "Dividend Safety",  "score": div_score,                                                         "note": div_note},
+        {"name": "52W Position",     "score": pos_score,                                                         "note": pos_note},
+        {"name": "Analyst Target",   "score": score_range(upside_pct, 15, -15, True), "weight": 2,              "note": pt_note},
     ]
-    total   = sum(c["score"] for c in criteria)
-    pct     = round(total / (len(criteria) * 10) * 100)
+    total    = sum(c["score"] * c.get("weight", 1) for c in criteria)
+    max_pts  = sum(10 * c.get("weight", 1) for c in criteria)
+    pct      = round(total / max_pts * 100)
     verdict = "BUY" if pct >= 70 else "HOLD" if pct >= 45 else "SELL"
     metrics = {
         "Price":          f"${price:.2f}",
@@ -644,8 +656,15 @@ def fetch_and_score(ticker, fh_key, av_key):
     if err or not q or not q.get("c") or q.get("c") == 0:
         raise ValueError(f"No price data for '{ticker}' ({err or 'empty quote'})")
     dq.ok("Finnhub")
-    price      = sf(q, "c")
-    change_pct = sf(q, "dp")
+    price       = sf(q, "c")
+    change_pct  = sf(q, "dp")
+    prev_close  = sf(q, "pc")
+    price_warn  = None
+    if price and prev_close and prev_close > 0:
+        deviation = abs((price - prev_close) / prev_close * 100)
+        if deviation > 25:
+            price_warn = (f"Price ${price:.2f} deviates {deviation:.0f}% from prev close "
+                          f"${prev_close:.2f} — possible bad data")
     pr, err = fh_get("/stock/profile2", {"symbol": ticker, "token": fh_key})
     if err: dq.fail("FH-Profile", err)
     pr = pr or {}
@@ -698,12 +717,12 @@ def fetch_and_score(ticker, fh_key, av_key):
     return {
         "ticker": ticker, "name": name, "type": asset_type,
         "sector": sector, "exchange": exchange,
-        "price": price, "change_pct": change_pct,
+        "price": price, "change_pct": change_pct, "price_warning": price_warn,
         "year_high": wk52_hi, "year_low": wk52_lo,
         "mkt_cap_b": mkt_cap_b,
         "metrics": metrics, "criteria": criteria,
-        "total": sum(c["score"] for c in criteria),
-        "max_total": len(criteria) * 10,
+        "total": sum(c["score"] * c.get("weight", 1) for c in criteria),
+        "max_total": sum(10 * c.get("weight", 1) for c in criteria),
         "pct": pct, "verdict": verdict, "dq": dq,
     }
 
@@ -739,12 +758,15 @@ def dq_badge(q):
 def render_criteria(criteria):
     rows = ""
     for c in criteria:
-        sc   = c["score"]
-        pct  = sc / 10 * 100
-        bc   = bar_color(sc)
-        note = _html.escape(str(c["note"])[:40]) if c["note"] else ""
+        sc     = c["score"]
+        weight = c.get("weight", 1)
+        pct    = sc / 10 * 100
+        bc     = bar_color(sc)
+        note   = _html.escape(str(c["note"])[:40]) if c["note"] else ""
+        w_badge = (' <span style="font-size:0.65rem;color:#58a6ff;font-weight:700;">×2</span>'
+                   if weight == 2 else "")
         rows += (f'<div class="crit-row">'
-                 f'<span class="crit-name">{_html.escape(c["name"])}</span>'
+                 f'<span class="crit-name">{_html.escape(c["name"])}{w_badge}</span>'
                  f'<div class="crit-bar-bg">'
                  f'<div class="crit-bar-fill {bc}" style="width:{pct}%"></div>'
                  f'</div>'
@@ -783,12 +805,15 @@ def render_card(r):
     chg_color = "#3fb950" if (chg or 0) >= 0 else "#ff7b72"
     dq = r.get("dq")
 
-    dq_quality = dq.quality if dq else "?"
+    dq_quality  = dq.quality if dq else "?"
+    price_warn  = r.get("price_warning")
     dq_warn = ""
+    if price_warn:
+        dq_warn += (f'<div class="danger-box" style="margin-top:6px;">⚠ {_html.escape(price_warn)}</div>')
     if dq_quality in ("LOW", "MEDIUM"):
-        dq_warn = (f'<div class="dq-warn-inline">⚠ Score based on partial data '
-                   f'({_html.escape(dq.summary) if dq and dq.summary else "some sources unavailable"})'
-                   f'</div>')
+        dq_warn += (f'<div class="dq-warn-inline">⚠ Score based on partial data '
+                    f'({_html.escape(dq.summary) if dq and dq.summary else "some sources unavailable"})'
+                    f'</div>')
     sector_html = ""
     if r.get("sector") and r["sector"] != "—":
         sector_html = f'&nbsp;·&nbsp; <span style="color:#8b949e;">{_html.escape(r["sector"][:30])}</span>'
@@ -902,12 +927,22 @@ if results:
     c4.metric("SELL",       sells, delta=None)
     st.markdown("---")
 
-# ── Sort: BUY first, then by score descending ─────────────────────────────────
-results.sort(key=lambda r: ({"BUY": 0, "HOLD": 1, "SELL": 2}[r["verdict"]], -r["pct"]))
+# ── Split and sort: stocks and ETFs separately, BUY first then by score ───────
+_sort_key = lambda r: ({"BUY": 0, "HOLD": 1, "SELL": 2}[r["verdict"]], -r["pct"])
+stocks = sorted([r for r in results if r["type"] == "Stock"], key=_sort_key)
+etfs   = sorted([r for r in results if r["type"] == "ETF"],   key=_sort_key)
 
-# ── Render cards ─────────────────────────────────────────────────────────────
-for r in results:
-    render_card(r)
+# ── Render stocks ─────────────────────────────────────────────────────────────
+if stocks:
+    st.markdown("### 📊 Stocks")
+    for r in stocks:
+        render_card(r)
+
+# ── Render ETFs ───────────────────────────────────────────────────────────────
+if etfs:
+    st.markdown("### 📦 ETFs")
+    for r in etfs:
+        render_card(r)
 
 for ticker, err in errors:
     st.error(f"**{ticker}**: {err}")

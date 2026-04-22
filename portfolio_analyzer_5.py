@@ -655,15 +655,15 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
         "chemical",
     )
     if _override == "Tech" or (not _override and any(x in sec_lower for x in _TECH_KEYWORDS)):
-        pe_good, pe_bad   = 30, 80     # tech: 30x = fair, 80x = expensive
-        gm_good, gm_bad   = 65, 25     # tech: 65% gross margin = excellent
+        pe_good, pe_bad   = 18, 60     # tightened: 18x = excellent, 60x = poor
+        gm_good, gm_bad   = 65, 25
         tier_label        = "Tech" + (" (override)" if _override else "")
     elif _override == "Industrial" or (not _override and any(x in sec_lower for x in _INDUSTRIAL_KEYWORDS)):
-        pe_good, pe_bad   = 15, 40     # industrial: 15x = fair, 40x = expensive
-        gm_good, gm_bad   = 35, 5      # industrial: 35% gross margin = excellent
+        pe_good, pe_bad   = 10, 28     # tightened: 10x = excellent, 28x = poor
+        gm_good, gm_bad   = 35, 5
         tier_label        = "Industrial" + (" (override)" if _override else "")
     else:
-        pe_good, pe_bad   = 20, 60     # default (healthcare, financials, consumer, etc.)
+        pe_good, pe_bad   = 13, 38     # tightened: 13x = excellent, 38x = poor
         gm_good, gm_bad   = 55, 15
         tier_label        = "Default"
 
@@ -728,6 +728,14 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
     if eg_pct is not None and eg_pct > 200:
         eg_score = min(eg_score, 6)
 
+    # 52W position: low % of range = better buy opportunity
+    if wk52_hi and wk52_lo and wk52_hi > wk52_lo and price:
+        pos_pct   = (price - wk52_lo) / (wk52_hi - wk52_lo) * 100
+        pos_score = score_range(pos_pct, 30, 75, False)
+        pos_note  = f"{pos_pct:.0f}% of range (${wk52_lo:.0f}–${wk52_hi:.0f})"
+    else:
+        pos_pct, pos_score, pos_note = None, 5, "N/A"
+
     criteria = [
         {"name": "Valuation (P/E)",
          "score": _pe_score,
@@ -739,7 +747,7 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
          "score": score_range(ps, ps_good, ps_bad, False),
          "note":  f"P/S {ps:.2f}x" if ps else "N/A"},
         {"name": "EV / EBITDA",
-         "score": score_range(ev_ebitda, 15, 60, False),
+         "score": score_range(ev_ebitda, 8, 40, False),
          "note":  f"EV/EBITDA {ev_ebitda:.1f}x" if ev_ebitda else "N/A"},
         {"name": "Return on Equity",
          "score": score_range(roe_pct, 20, 0, True),
@@ -760,13 +768,16 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
         {"name": "Dividend Safety",
          "score": div_score,
          "note":  div_note},
+        {"name": "52W Position",
+         "score": pos_score,
+         "note":  pos_note},
         {"name": "Analyst Target",
-         "score": score_range(upside_pct, 15, -15, True),
+         "score": score_range(upside_pct, 15, -15, True), "weight": 2,
          "note":  pt_note},
     ]
 
-    total     = sum(c["score"] for c in criteria)
-    max_total = len(criteria) * 10
+    total     = sum(c["score"] * c.get("weight", 1) for c in criteria)
+    max_total = sum(10 * c.get("weight", 1) for c in criteria)
     pct       = round(total / max_total * 100)
     verdict   = "BUY" if pct >= 70 else "HOLD" if pct >= 45 else "SELL"
 
@@ -822,8 +833,15 @@ def fetch_and_score(ticker, fh_key, av_key):
             f"No price data for '{ticker}' — "
             f"check the symbol is correct. ({err or 'empty quote'})")
     dq.ok("Finnhub")
-    price      = sf(q, "c")
-    change_pct = sf(q, "dp")
+    price       = sf(q, "c")
+    change_pct  = sf(q, "dp")
+    prev_close  = sf(q, "pc")
+    price_warn  = None
+    if price and prev_close and prev_close > 0:
+        deviation = abs((price - prev_close) / prev_close * 100)
+        if deviation > 25:
+            price_warn = (f"Price ${price:.2f} deviates {deviation:.0f}% from prev close "
+                          f"${prev_close:.2f} — possible bad data")
 
     # ── Step 2: Finnhub company profile (non-fatal) ──────────────────────────
     pr, err = fh_get("/stock/profile2", {"symbol": ticker, "token": fh_key})
@@ -908,8 +926,8 @@ def fetch_and_score(ticker, fh_key, av_key):
         asset_type = "Stock"
         sector     = industry
 
-    total     = sum(c["score"] for c in criteria)
-    max_total = len(criteria) * 10
+    total     = sum(c["score"] * c.get("weight", 1) for c in criteria)
+    max_total = sum(10 * c.get("weight", 1) for c in criteria)
 
     return {
         "ticker":     ticker,
@@ -917,9 +935,10 @@ def fetch_and_score(ticker, fh_key, av_key):
         "type":       asset_type,
         "sector":     sector,
         "exchange":   exchange,
-        "price":      price,
-        "change_pct": change_pct,
-        "year_high":  wk52_hi,
+        "price":         price,
+        "change_pct":    change_pct,
+        "price_warning": price_warn,
+        "year_high":     wk52_hi,
         "year_low":   wk52_lo,
         "mkt_cap_b":  mkt_cap_b,
         "metrics":    metrics,
@@ -944,11 +963,13 @@ def build_detail(r):
                   if r["type"] == "ETF" else
                   "Stock (11 criteria: fundamentals + analyst price target)")
 
+    price_warn = r.get("price_warning")
     lines = [
         "═" * 78,
         f"  {r['ticker']}   {r['name']}",
         f"  {r['type']}  ·  {r['sector']}  ·  {r['exchange']}",
         f"  Data quality: {qual}" + (f"   {dq.summary}" if dq and dq.summary else ""),
+    ] + ([f"  !! PRICE WARNING: {price_warn}"] if price_warn else []) + [
         "─" * 78,
         f"  Price: ${r['price']:.2f}   Change: {chg}   "
         f"52W: ${r['year_low']:.0f}–${r['year_high']:.0f}" if r["year_high"] and r["year_low"]
