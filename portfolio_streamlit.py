@@ -99,9 +99,15 @@ div[data-testid="stExpander"] { border: 1px solid #21262d !important; border-rad
 </style>
 """, unsafe_allow_html=True)
 
-# ── API Keys — loaded from Streamlit Cloud secrets ───────────────────────────
-FINNHUB_KEY = st.secrets["FINNHUB_KEY"]
-AV_KEY      = st.secrets["AV_KEY"]
+# ── API Keys — secrets preferred; hardcoded fallback if secrets missing ──────
+try:
+    FINNHUB_KEY = st.secrets["FINNHUB_KEY"]
+except Exception:
+    FINNHUB_KEY = "d787fi1r01qsamsj83h0d787fi1r01qsamsj83hg"
+try:
+    AV_KEY = st.secrets["AV_KEY"]
+except Exception:
+    AV_KEY = "DRFXF3KZF59XEVA4"
 
 # ── API / timing config ──────────────────────────────────────────────────────
 FH_BASE        = "https://finnhub.io/api/v1"
