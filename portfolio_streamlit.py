@@ -4,9 +4,16 @@ Portfolio Analyzer — Streamlit Web Edition
 Run locally:  streamlit run portfolio_streamlit.py
 Deploy:       push to GitHub → connect at share.streamlit.io
 Mobile:       open the Streamlit Cloud URL on any device
+
+Data architecture (v3 — yfinance-first):
+  PRIMARY  → yfinance  : price, fundamentals, targets, ETF data (free, no key)
+  SECONDARY → Finnhub  : real-time price quote only (free, fast)
+  REMOVED  → Alpha Vantage : was 13 s/ticker × N tickers = app timeout
+  PARALLEL → ThreadPoolExecutor : all tickers fetched simultaneously
 """
 
-import time, warnings, requests, html as _html
+import time, warnings, requests, html as _html, threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit as st
 
 warnings.filterwarnings("ignore")
@@ -99,74 +106,76 @@ div[data-testid="stExpander"] { border: 1px solid #21262d !important; border-rad
 </style>
 """, unsafe_allow_html=True)
 
-# ── API Keys — secrets preferred; hardcoded fallback if secrets missing ──────
+# ── API Keys ──────────────────────────────────────────────────────────────────
 try:
     FINNHUB_KEY = st.secrets["FINNHUB_KEY"]
 except Exception:
     FINNHUB_KEY = "d787fi1r01qsamsj83h0d787fi1r01qsamsj83hg"
 try:
-    AV_KEY = st.secrets["AV_KEY"]
+    AV_KEY = st.secrets["AV_KEY"]   # kept for forward compatibility, not actively used
 except Exception:
     AV_KEY = "DRFXF3KZF59XEVA4"
 
 # ── API / timing config ──────────────────────────────────────────────────────
 FH_BASE        = "https://finnhub.io/api/v1"
-AV_BASE        = "https://www.alphavantage.co/query"
-TIMEOUT        = 15
-FH_DELAY       = 0.22
-AV_DELAY       = 13.0
-YF_DELAY       = 0.5
-RETRY_ATTEMPTS = 3
-RETRY_BACKOFF  = 2.0
+TIMEOUT        = 12
+FH_MIN_GAP     = 0.25   # minimum seconds between Finnhub calls (thread-safe enforced)
+YF_DELAY       = 0.15   # polite pause per yfinance call
+RETRY_ATTEMPTS = 2
+RETRY_BACKOFF  = 1.5
+
+# Thread-safe Finnhub rate limiter — serialises calls across parallel workers
+_fh_lock   = threading.Lock()
+_fh_last_t = [0.0]
 
 # ── Default portfolio ────────────────────────────────────────────────────────
 DEFAULT_TICKERS = ["NVDA", "AMZN", "GOOGL", "GEV", "CAT", "F", "PCAR", "JEPQ", "VUG"]
 
 # ── ETF database ─────────────────────────────────────────────────────────────
 ETF_DB = {
-    "SPY":  {"expense":0.0945,"num_holdings":503,  "category":"S&P 500",              "beta_fallback":1.00},
-    "IVV":  {"expense":0.03,  "num_holdings":503,  "category":"S&P 500",              "beta_fallback":1.00},
-    "VOO":  {"expense":0.03,  "num_holdings":503,  "category":"S&P 500",              "multi_class_aum":True, "beta_fallback":1.00},
-    "VTI":  {"expense":0.03,  "num_holdings":3700, "category":"Total US Market",      "multi_class_aum":True, "beta_fallback":1.00},
-    "VUG":  {"expense":0.04,  "num_holdings":150,  "category":"Large Cap Growth",     "multi_class_aum":True, "beta_fallback":1.05},
-    "QQQ":  {"expense":0.20,  "num_holdings":101,  "category":"Nasdaq-100",           "beta_fallback":1.15},
-    "QQQM": {"expense":0.15,  "num_holdings":101,  "category":"Nasdaq-100",           "beta_fallback":1.15},
-    "IWF":  {"expense":0.19,  "num_holdings":330,  "category":"Large Cap Growth",     "beta_fallback":1.10},
-    "SPYG": {"expense":0.04,  "num_holdings":240,  "category":"Large Cap Growth",     "beta_fallback":1.05},
-    "MGK":  {"expense":0.07,  "num_holdings":69,   "category":"Mega Cap Growth",      "beta_fallback":1.10},
-    "VTV":  {"expense":0.04,  "num_holdings":340,  "category":"Large Cap Value",      "multi_class_aum":True, "beta_fallback":0.92},
-    "SCHD": {"expense":0.06,  "num_holdings":103,  "category":"Dividend Growth",      "beta_fallback":0.85},
-    "VIG":  {"expense":0.06,  "num_holdings":338,  "category":"Dividend Growth",      "multi_class_aum":True, "beta_fallback":0.85},
-    "DGRO": {"expense":0.08,  "num_holdings":420,  "category":"Dividend Growth",      "beta_fallback":0.85},
-    "DVY":  {"expense":0.38,  "num_holdings":100,  "category":"High Dividend",        "beta_fallback":0.80},
-    "VYM":  {"expense":0.06,  "num_holdings":555,  "category":"High Dividend Yield",  "multi_class_aum":True, "beta_fallback":0.82},
+    "SPY":  {"expense":0.0945,"num_holdings":503,  "category":"S&P 500",               "beta_fallback":1.00},
+    "IVV":  {"expense":0.03,  "num_holdings":503,  "category":"S&P 500",               "beta_fallback":1.00},
+    "VOO":  {"expense":0.03,  "num_holdings":503,  "category":"S&P 500",               "multi_class_aum":True, "beta_fallback":1.00},
+    "VTI":  {"expense":0.03,  "num_holdings":3700, "category":"Total US Market",       "multi_class_aum":True, "beta_fallback":1.00},
+    "VUG":  {"expense":0.04,  "num_holdings":150,  "category":"Large Cap Growth",      "multi_class_aum":True, "beta_fallback":1.05},
+    "QQQ":  {"expense":0.20,  "num_holdings":101,  "category":"Nasdaq-100",            "beta_fallback":1.15},
+    "QQQM": {"expense":0.15,  "num_holdings":101,  "category":"Nasdaq-100",            "beta_fallback":1.15},
+    "IWF":  {"expense":0.19,  "num_holdings":330,  "category":"Large Cap Growth",      "beta_fallback":1.10},
+    "SPYG": {"expense":0.04,  "num_holdings":240,  "category":"Large Cap Growth",      "beta_fallback":1.05},
+    "MGK":  {"expense":0.07,  "num_holdings":69,   "category":"Mega Cap Growth",       "beta_fallback":1.10},
+    "VTV":  {"expense":0.04,  "num_holdings":340,  "category":"Large Cap Value",       "multi_class_aum":True, "beta_fallback":0.92},
+    "SCHD": {"expense":0.06,  "num_holdings":103,  "category":"Dividend Growth",       "beta_fallback":0.85},
+    "VIG":  {"expense":0.06,  "num_holdings":338,  "category":"Dividend Growth",       "multi_class_aum":True, "beta_fallback":0.85},
+    "DGRO": {"expense":0.08,  "num_holdings":420,  "category":"Dividend Growth",       "beta_fallback":0.85},
+    "DVY":  {"expense":0.38,  "num_holdings":100,  "category":"High Dividend",         "beta_fallback":0.80},
+    "VYM":  {"expense":0.06,  "num_holdings":555,  "category":"High Dividend Yield",   "multi_class_aum":True, "beta_fallback":0.82},
     "JEPI": {"expense":0.35,  "num_holdings":101,  "category":"Covered Call / S&P 500 Income", "beta_fallback":0.55},
     "JEPQ": {"expense":0.35,  "num_holdings":93,   "category":"Covered Call / Nasdaq Income",  "beta_fallback":0.62},
     "XYLD": {"expense":0.60,  "num_holdings":503,  "category":"Covered Call / S&P 500",        "beta_fallback":0.60},
     "QYLD": {"expense":0.60,  "num_holdings":101,  "category":"Covered Call / Nasdaq",         "beta_fallback":0.65},
-    "XLK":  {"expense":0.10,  "num_holdings":67,   "category":"Technology Sector",    "beta_fallback":1.20},
-    "VGT":  {"expense":0.10,  "num_holdings":316,  "category":"Technology Sector",    "multi_class_aum":True, "beta_fallback":1.20},
-    "IYW":  {"expense":0.38,  "num_holdings":144,  "category":"U.S. Technology",      "beta_fallback":1.20},
-    "SMH":  {"expense":0.35,  "num_holdings":26,   "category":"Semiconductors",       "beta_fallback":1.35},
-    "SOXX": {"expense":0.35,  "num_holdings":30,   "category":"Semiconductors",       "beta_fallback":1.35},
-    "XLF":  {"expense":0.10,  "num_holdings":74,   "category":"Financials",           "beta_fallback":1.10},
-    "XLV":  {"expense":0.10,  "num_holdings":63,   "category":"Healthcare",           "beta_fallback":0.72},
-    "XLE":  {"expense":0.10,  "num_holdings":23,   "category":"Energy",               "beta_fallback":1.05},
-    "XLI":  {"expense":0.10,  "num_holdings":79,   "category":"Industrials",          "beta_fallback":1.00},
+    "XLK":  {"expense":0.10,  "num_holdings":67,   "category":"Technology Sector",     "beta_fallback":1.20},
+    "VGT":  {"expense":0.10,  "num_holdings":316,  "category":"Technology Sector",     "multi_class_aum":True, "beta_fallback":1.20},
+    "IYW":  {"expense":0.38,  "num_holdings":144,  "category":"U.S. Technology",       "beta_fallback":1.20},
+    "SMH":  {"expense":0.35,  "num_holdings":26,   "category":"Semiconductors",        "beta_fallback":1.35},
+    "SOXX": {"expense":0.35,  "num_holdings":30,   "category":"Semiconductors",        "beta_fallback":1.35},
+    "XLF":  {"expense":0.10,  "num_holdings":74,   "category":"Financials",            "beta_fallback":1.10},
+    "XLV":  {"expense":0.10,  "num_holdings":63,   "category":"Healthcare",            "beta_fallback":0.72},
+    "XLE":  {"expense":0.10,  "num_holdings":23,   "category":"Energy",                "beta_fallback":1.05},
+    "XLI":  {"expense":0.10,  "num_holdings":79,   "category":"Industrials",           "beta_fallback":1.00},
     "VEA":  {"expense":0.05,  "num_holdings":3900, "category":"Developed Markets ex-US","multi_class_aum":True,"beta_fallback":0.90},
-    "VWO":  {"expense":0.08,  "num_holdings":5800, "category":"Emerging Markets",     "multi_class_aum":True, "beta_fallback":0.85},
-    "BND":  {"expense":0.03,  "num_holdings":10000,"category":"Total US Bond Market", "beta_fallback":0.05},
-    "AGG":  {"expense":0.03,  "num_holdings":10000,"category":"Total US Bond Market", "beta_fallback":0.05},
-    "TLT":  {"expense":0.15,  "num_holdings":30,   "category":"Long-Term Treasury",   "beta_fallback":0.20},
-    "GLD":  {"expense":0.40,  "num_holdings":1,    "category":"Gold",                 "beta_fallback":0.08},
-    "IAU":  {"expense":0.25,  "num_holdings":1,    "category":"Gold",                 "beta_fallback":0.08},
-    "VNQ":  {"expense":0.13,  "num_holdings":160,  "category":"US REITs",             "multi_class_aum":True, "beta_fallback":0.85},
-    "ARKK": {"expense":0.75,  "num_holdings":30,   "category":"Disruptive Innovation","beta_fallback":1.55},
+    "VWO":  {"expense":0.08,  "num_holdings":5800, "category":"Emerging Markets",      "multi_class_aum":True, "beta_fallback":0.85},
+    "BND":  {"expense":0.03,  "num_holdings":10000,"category":"Total US Bond Market",  "beta_fallback":0.05},
+    "AGG":  {"expense":0.03,  "num_holdings":10000,"category":"Total US Bond Market",  "beta_fallback":0.05},
+    "TLT":  {"expense":0.15,  "num_holdings":30,   "category":"Long-Term Treasury",    "beta_fallback":0.20},
+    "GLD":  {"expense":0.40,  "num_holdings":1,    "category":"Gold",                  "beta_fallback":0.08},
+    "IAU":  {"expense":0.25,  "num_holdings":1,    "category":"Gold",                  "beta_fallback":0.08},
+    "VNQ":  {"expense":0.13,  "num_holdings":160,  "category":"US REITs",              "multi_class_aum":True, "beta_fallback":0.85},
+    "ARKK": {"expense":0.75,  "num_holdings":30,   "category":"Disruptive Innovation", "beta_fallback":1.55},
 }
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  CORE FUNCTIONS  (identical to portfolio_analyzer_5.py — no GUI imports)
+#  CORE FUNCTIONS
 # ════════════════════════════════════════════════════════════════════════════
 
 def sf(d, key, default=None):
@@ -193,8 +202,13 @@ def score_range(val, good, bad, higher=True):
 
 
 def fh_get(path, params):
+    """Thread-safe Finnhub GET — serialises calls with minimum gap between them."""
+    with _fh_lock:
+        gap = FH_MIN_GAP - (time.time() - _fh_last_t[0])
+        if gap > 0:
+            time.sleep(gap)
+        _fh_last_t[0] = time.time()
     for attempt in range(RETRY_ATTEMPTS):
-        time.sleep(FH_DELAY)
         try:
             r = requests.get(f"{FH_BASE}{path}", params=params, timeout=TIMEOUT)
             if r.status_code == 200:
@@ -204,113 +218,96 @@ def fh_get(path, params):
                 continue
             return None, f"HTTP {r.status_code}"
         except requests.exceptions.Timeout:
-            if attempt < RETRY_ATTEMPTS - 1:
-                time.sleep(RETRY_BACKOFF)
-                continue
-            return None, "Timeout after 3 attempts"
+            return None, "Timeout"
         except Exception as e:
             return None, str(e)[:80]
     return None, "Max retries exceeded"
 
 
-def av_get(params):
-    time.sleep(AV_DELAY)
-    try:
-        r = requests.get(AV_BASE, params=params, timeout=TIMEOUT)
-        if r.status_code != 200:
-            return None, f"HTTP {r.status_code}"
-        data = r.json()
-        if "Note" in data:        return None, "AV rate limit — wait 1 min"
-        if "Information" in data: return None, "AV key error: " + data["Information"][:60]
-        if not data:              return None, "AV returned empty response"
-        return data, None
-    except Exception as e:
-        return None, str(e)[:80]
-
-
-def yf_get_etf(ticker):
+def yf_get_all(ticker):
+    """
+    Primary data source — ONE yfinance call returns everything:
+    price, fundamentals, analyst targets, ETF metrics, sector info.
+    Replaces av_get + yf_get_etf + yf_get_stock + fh_price_target.
+    """
     if not YF_AVAILABLE:
         return {}, "yfinance not installed"
     time.sleep(YF_DELAY)
     try:
         info = yf.Ticker(ticker).info
-        if not info or info.get("regularMarketPrice") is None:
-            return {}, f"yfinance returned empty info for {ticker}"
+        if not info:
+            return {}, f"yfinance: empty response for {ticker}"
+
+        price = (info.get("regularMarketPrice") or
+                 info.get("currentPrice") or
+                 info.get("previousClose"))
+        if not price or price == 0:
+            return {}, f"yfinance: no price for {ticker}"
+
+        # Exchange code → readable name
+        exc_raw = info.get("exchange", "")
+        exc_map = {"NMS": "NASDAQ", "NYQ": "NYSE", "NGM": "NASDAQ",
+                   "NasdaqGS": "NASDAQ", "NasdaqGM": "NASDAQ",
+                   "PCX": "NYSE Arca", "NYSEArca": "NYSE Arca",
+                   "BTS": "BATS", "PNK": "OTC"}
+        exchange = (exc_map.get(exc_raw) or
+                    info.get("fullExchangeName") or
+                    exc_raw or "—")
+
+        # yfinance returns dividendYield and ytdReturn as percentages (e.g. 11.1 = 11.1%)
         raw_div = info.get("dividendYield")
         raw_ytd = info.get("ytdReturn")
+        # Prefer TTM earnings growth; fall back to quarterly
+        eg = info.get("earningsGrowth") or info.get("earningsQuarterlyGrowth")
+
         return {
-            "trailingPE":   info.get("trailingPE"),
-            "totalAssets":  info.get("totalAssets"),
-            "dividendYield": raw_div / 100 if raw_div is not None else None,
-            "beta":         info.get("beta"),
-            "52WeekHigh":   info.get("fiftyTwoWeekHigh"),
-            "52WeekLow":    info.get("fiftyTwoWeekLow"),
-            "ytdReturn":    raw_ytd / 100 if raw_ytd is not None else None,
+            # ── Price ────────────────────────────────────────────────────────
+            "price":        price,
+            "change_pct":   info.get("regularMarketChangePercent"),
+            "prev_close":   (info.get("regularMarketPreviousClose") or
+                             info.get("previousClose")),
+            # ── Identity ─────────────────────────────────────────────────────
+            "name":         (info.get("longName") or
+                             info.get("shortName") or ticker),
+            "exchange":     exchange,
+            "sector":       info.get("sector") or "—",
+            "industry":     info.get("industry") or "—",
+            "asset_type":   info.get("quoteType", "EQUITY"),
+            "market_cap":   info.get("marketCap"),
+            # ── Valuation ────────────────────────────────────────────────────
+            "TrailingPE":           info.get("trailingPE"),
+            "ForwardPE":            info.get("forwardPE"),
+            "PriceToBookRatio":     info.get("priceToBook"),
+            "PriceToSalesRatioTTM": info.get("priceToSalesTrailing12Months"),
+            "EVToEBITDA":           info.get("enterpriseToEbitda"),
+            # ── Profitability ─────────────────────────────────────────────────
+            "ReturnOnEquityTTM":    info.get("returnOnEquity"),
+            "ProfitMargin":         info.get("profitMargins"),
+            "OperatingMarginTTM":   info.get("operatingMargins"),
+            "_grossMargins":        info.get("grossMargins"),      # decimal (0.55 = 55%)
+            "GrossProfitTTM":       info.get("grossProfits"),
+            "RevenueTTM":           info.get("totalRevenue"),
+            # ── Growth ────────────────────────────────────────────────────────
+            "QuarterlyEarningsGrowthYOY": eg,
+            "QuarterlyRevenueGrowthYOY":  info.get("revenueGrowth"),
+            # ── Dividends ─────────────────────────────────────────────────────
+            "DividendYield": raw_div / 100 if raw_div is not None else None,
+            "PayoutRatio":   info.get("payoutRatio"),
+            # ── 52-Week range ─────────────────────────────────────────────────
+            "52WeekHigh": info.get("fiftyTwoWeekHigh"),
+            "52WeekLow":  info.get("fiftyTwoWeekLow"),
+            # ── Analyst targets ───────────────────────────────────────────────
+            "targetMeanPrice": info.get("targetMeanPrice"),
+            "targetHighPrice": info.get("targetHighPrice"),
+            "targetLowPrice":  info.get("targetLowPrice"),
+            # ── ETF-specific ──────────────────────────────────────────────────
+            "totalAssets": info.get("totalAssets"),
+            "beta":        info.get("beta"),
+            "trailingPE":  info.get("trailingPE"),   # for ETF Holdings P/E display
+            "ytdReturn":   raw_ytd / 100 if raw_ytd is not None else None,
         }, None
     except Exception as e:
         return {}, str(e)[:80]
-
-
-def yf_get_stock(ticker):
-    if not YF_AVAILABLE:
-        return {}, "yfinance not installed"
-    time.sleep(YF_DELAY)
-    try:
-        info = yf.Ticker(ticker).info
-        if not info or info.get("regularMarketPrice") is None:
-            return {}, f"yfinance returned empty info for {ticker}"
-        d = {}
-        if info.get("trailingPE")       is not None: d["TrailingPE"]                  = info["trailingPE"]
-        if info.get("forwardPE")        is not None: d["ForwardPE"]                   = info["forwardPE"]
-        if info.get("priceToBook")      is not None: d["PriceToBookRatio"]            = info["priceToBook"]
-        if info.get("priceToSalesTrailing12Months") is not None:
-            d["PriceToSalesRatioTTM"] = info["priceToSalesTrailing12Months"]
-        if info.get("enterpriseToEbitda") is not None: d["EVToEBITDA"]               = info["enterpriseToEbitda"]
-        if info.get("returnOnEquity")   is not None: d["ReturnOnEquityTTM"]           = info["returnOnEquity"]
-        if info.get("profitMargins")    is not None: d["ProfitMargin"]                = info["profitMargins"]
-        if info.get("operatingMargins") is not None: d["OperatingMarginTTM"]          = info["operatingMargins"]
-        if info.get("grossMargins")     is not None: d["_grossMargins"]               = info["grossMargins"]
-        # Growth — prefer earningsGrowth (TTM YoY) over earningsQuarterlyGrowth (single quarter)
-        _eg = info.get("earningsGrowth")
-        if _eg is None:
-            _eg = info.get("earningsQuarterlyGrowth")
-        if _eg is not None:
-            d["QuarterlyEarningsGrowthYOY"] = _eg
-        if info.get("revenueGrowth")    is not None: d["QuarterlyRevenueGrowthYOY"]   = info["revenueGrowth"]
-        if info.get("dividendYield")    is not None: d["DividendYield"]               = info["dividendYield"] / 100
-        if info.get("payoutRatio")      is not None: d["PayoutRatio"]                 = info["payoutRatio"]
-        if info.get("fiftyTwoWeekHigh") is not None: d["52WeekHigh"]                  = info["fiftyTwoWeekHigh"]
-        if info.get("fiftyTwoWeekLow")  is not None: d["52WeekLow"]                   = info["fiftyTwoWeekLow"]
-        return d, None
-    except Exception as e:
-        return {}, str(e)[:80]
-
-
-def fh_price_target(ticker, fh_key):
-    if YF_AVAILABLE:
-        try:
-            time.sleep(YF_DELAY)
-            info = yf.Ticker(ticker).info
-            mean = info.get("targetMeanPrice")
-            high = info.get("targetHighPrice")
-            low  = info.get("targetLowPrice")
-            if mean and float(mean) > 0:
-                return {"mean": float(mean),
-                        "high": float(high) if high else None,
-                        "low":  float(low)  if low  else None}, None
-        except Exception:
-            pass
-    data, err = fh_get("/stock/price-target", {"symbol": ticker, "token": fh_key})
-    if err or not data:
-        return None, err or "no analyst target available"
-    mean = data.get("targetMean") or data.get("targetMedian")
-    high = data.get("targetHigh")
-    low  = data.get("targetLow")
-    if not mean:
-        return None, "no analyst price target available"
-    return {"mean": float(mean),
-            "high": float(high) if high else None,
-            "low":  float(low)  if low  else None}, None
 
 
 class DataQuality:
@@ -318,7 +315,8 @@ class DataQuality:
         self.sources_ok   = []
         self.sources_fail = []
         self.notes        = []
-    def ok(self, src):         self.sources_ok.append(src)
+    def ok(self, src):
+        self.sources_ok.append(src)
     def fail(self, src, why):
         self.sources_fail.append(src)
         self.notes.append(f"{src}: {why}")
@@ -335,7 +333,6 @@ class DataQuality:
 
 
 def _etf_div_label(category, div_pct):
-    """Return an accurate 'not scored' label based on the ETF's actual category."""
     cat = category.lower()
     if any(x in cat for x in ("s&p","nasdaq","total market","total us","broad")):
         label = "index ETF"
@@ -401,15 +398,10 @@ def score_etf(ticker, price, wk52_hi_fh, wk52_lo_fh, db_entry, av_data, yf_data,
          "score": score_range(aum_b, 10, 0.5, True),
          "note":  ((f"${aum_b:.1f}B (ETF share class)" if _multi_class else f"${aum_b:.1f}B")
                    if aum_b else "N/A")},
-        # Dividend Yield:
-        #   - is_bond=True  → already scored as "Income Yield" above; neutral here to avoid double-count
-        #   - income/div category → score normally
-        #   - everything else (index, sector, intl) → neutral + accurate label
         {"name": "Dividend Yield",
          "score": (5 if is_bond else
                    score_range(div_pct, 5, 0, True)
-                   if any(x in category.lower() for x in
-                          ("dividend","reit","high yield"))
+                   if any(x in category.lower() for x in ("dividend","reit","high yield"))
                    else 5),
          "note":  ("See Income Yield" if is_bond else
                    (f"{div_pct:.2f}%" if div_pct else "None")
@@ -484,60 +476,70 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
     op_pct    = op_m * 100 if op_m is not None else None
 
     _TIER_OVERRIDES = {
-        # ── E-commerce / marketplace (Finnhub: "Broadline Retail", "Consumer Cyclical") ──
-        "AMZN": "Tech",  "SHOP": "Tech",  "EBAY": "Tech",  "ETSY": "Tech",  "MELI": "Tech",
-        "JD":   "Tech",  "PDD":  "Tech",  "SE":   "Tech",
-        # ── Streaming / gaming (Finnhub: "Entertainment", "Media") ──
-        "NFLX": "Tech",  "SPOT": "Tech",  "RBLX": "Tech",  "EA":   "Tech",  "TTWO": "Tech",
-        "ATVI": "Tech",  "MTCH": "Tech",
-        # ── Mobility / gig economy (Finnhub: "Transportation", "Consumer Cyclical") ──
-        "UBER": "Tech",  "LYFT": "Tech",  "DASH": "Tech",  "ABNB": "Tech",
-        # ── Online travel (Finnhub: "Hotels, Restaurants & Leisure") ──
-        "BKNG": "Tech",  "EXPE": "Tech",  "TRIP": "Tech",
-        # ── Fintech / payments (Finnhub: "Financial Services", "Capital Markets") ──
-        "PYPL": "Tech",  "XYZ":  "Tech",  "SQ":   "Tech",  "COIN": "Tech",  "SOFI": "Tech",
-        "AFRM": "Tech",  "UPST": "Tech",  "HOOD": "Tech",  "NU":   "Tech",  "BILL": "Tech",
-        "FOUR": "Tech",  "FLYW": "Tech",
-        # ── Payment networks — pure software economics, high P/E justified ──
-        "V":    "Tech",  "MA":   "Tech",  "FISV": "Tech",  "FIS":  "Tech",  "GPN":  "Tech",
-        "ADP":  "Tech",  "PAYX": "Tech",
-        # ── Healthcare SaaS / digital health ──
-        "VEEV": "Tech",  "TDOC": "Tech",  "HIMS": "Tech",  "DOCS": "Tech",
-        # ── Autos with software/tech valuation premium ──
-        "TSLA": "Tech",  "RIVN": "Tech",  "LCID": "Tech",
-        # ── Communication services safety net (Finnhub sometimes returns "Media") ──
-        "GOOGL":"Tech",  "GOOG": "Tech",  "META": "Tech",  "SNAP": "Tech",  "PINS": "Tech",
-        "ZM":   "Tech",  "TWLO": "Tech",  "DDOG": "Tech",
-        # ── Industrial overrides ──
-        # Heavy machinery (Finnhub may return "Trucks" or "Agriculture" missing keyword)
-        "PCAR": "Industrial",  "AGCO": "Industrial",  "OSK":  "Industrial",
-        "CMI":  "Industrial",  "GNRC": "Industrial",
-        # Aerospace / defense safety net
-        "GD":   "Industrial",  "NOC":  "Industrial",  "HII":  "Industrial",
-        "TDG":  "Industrial",  "HEI":  "Industrial",
-        # Energy equipment & services
-        "HAL":  "Industrial",  "BKR":  "Industrial",  "SLB":  "Industrial",
+        # E-commerce / marketplace
+        "AMZN":"Tech","SHOP":"Tech","EBAY":"Tech","ETSY":"Tech","MELI":"Tech",
+        "JD":"Tech","PDD":"Tech","SE":"Tech",
+        # Streaming / gaming
+        "NFLX":"Tech","SPOT":"Tech","RBLX":"Tech","EA":"Tech","TTWO":"Tech",
+        "ATVI":"Tech","MTCH":"Tech",
+        # Mobility / gig economy
+        "UBER":"Tech","LYFT":"Tech","DASH":"Tech","ABNB":"Tech",
+        # Online travel
+        "BKNG":"Tech","EXPE":"Tech","TRIP":"Tech",
+        # Fintech / payments
+        "PYPL":"Tech","SQ":"Tech","COIN":"Tech","SOFI":"Tech","AFRM":"Tech",
+        "UPST":"Tech","HOOD":"Tech","NU":"Tech","BILL":"Tech","FOUR":"Tech",
+        # Payment networks
+        "V":"Tech","MA":"Tech","FISV":"Tech","FIS":"Tech","GPN":"Tech",
+        "ADP":"Tech","PAYX":"Tech",
+        # Healthcare SaaS
+        "VEEV":"Tech","TDOC":"Tech","HIMS":"Tech","DOCS":"Tech",
+        # EVs with software premium
+        "TSLA":"Tech","RIVN":"Tech","LCID":"Tech",
+        # Communication services → Tech scoring
+        "GOOGL":"Tech","GOOG":"Tech","META":"Tech","SNAP":"Tech","PINS":"Tech",
+        "ZM":"Tech","TWLO":"Tech","DDOG":"Tech",
+        # Media/Entertainment → Default (NOT pure tech, lower margins)
+        "DIS":"Default","CMCSA":"Default","CHTR":"Default",
+        "T":"Default","VZ":"Default","WBD":"Default","FOX":"Default","PARA":"Default",
+        # Telecom → Default
+        "TMUS":"Default",
+        # Heavy industrials
+        "PCAR":"Industrial","AGCO":"Industrial","OSK":"Industrial",
+        "CMI":"Industrial","GNRC":"Industrial",
+        # Aerospace / defense
+        "GD":"Industrial","NOC":"Industrial","HII":"Industrial",
+        "TDG":"Industrial","HEI":"Industrial","LMT":"Industrial","RTX":"Industrial",
+        "BA":"Industrial","HWM":"Industrial",
+        # Energy equipment
+        "HAL":"Industrial","BKR":"Industrial","SLB":"Industrial",
         # Renewables manufacturing
-        "FSLR": "Industrial",  "RUN":  "Industrial",
-        # Power / electrical (GEV safety net)
-        "GEV":  "Industrial",  "ETN":  "Industrial",  "ACHR": "Industrial",
-        # Solar semiconductors (scored as Tech, not Industrial)
-        "ENPH": "Tech",  "SEDG": "Tech",
+        "FSLR":"Industrial","RUN":"Industrial",
+        # Power / electrical
+        "GEV":"Industrial","ETN":"Industrial","ACHR":"Industrial",
+        "EMR":"Industrial","ROK":"Industrial","AME":"Industrial",
+        # Automakers (yfinance sector = "Consumer Cyclical" — override to Industrial)
+        "F":"Industrial","GM":"Industrial","STLA":"Industrial",
+        "TM":"Industrial","HMC":"Industrial","NSANY":"Industrial",
+        # Solar semiconductors scored as Tech
+        "ENPH":"Tech","SEDG":"Tech",
     }
     sec_lower = (sector or "").lower()
     _override = _TIER_OVERRIDES.get(ticker.upper() if ticker else "")
     _TECH = ("technology","semiconductor","software","internet","cloud","saas",
-             "artificial intelligence","communication","interactive","e-commerce",
-             "electronic","information technology")
-    _IND  = ("capital goods","automobile","transportation","energy","industrial",
-             "manufacturing","machinery","defense","aerospace","electrical",
-             "power","oil","mining","construction","steel","chemical")
+             "artificial intelligence","communication services","interactive",
+             "e-commerce","electronic","information technology")
+    _IND  = ("capital goods","industrials","industrial","automobile","auto manufacturer",
+             "transportation","energy","manufacturing","machinery","defense",
+             "aerospace","electrical","power","oil","mining","construction",
+             "steel","chemical","farm","heavy equipment","truck")
+
     if _override == "Tech" or (not _override and any(x in sec_lower for x in _TECH)):
-        # Tightened bands: P/E 18x = excellent (was 30x), 60x = poor (was 80x)
-        # This prevents rich-but-quality tech stocks from scoring 10/10 by default
         pe_good, pe_bad, gm_good, gm_bad, tier_label = 18, 60, 65, 25, "Tech" + (" (override)" if _override else "")
     elif _override == "Industrial" or (not _override and any(x in sec_lower for x in _IND)):
         pe_good, pe_bad, gm_good, gm_bad, tier_label = 10, 28, 35, 5,  "Industrial" + (" (override)" if _override else "")
+    elif _override == "Default":
+        pe_good, pe_bad, gm_good, gm_bad, tier_label = 13, 38, 55, 15, "Default (override)"
     else:
         pe_good, pe_bad, gm_good, gm_bad, tier_label = 13, 38, 55, 15, "Default"
 
@@ -574,10 +576,9 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
         div_score = score_range(payout_pct, 20, 85, False)
         div_note  = f"Yield {div_pct:.2f}%  Payout {payout_pct:.0f}%"
     else:
-        div_score = 5   # neutral — absence of dividend is neither good nor bad
+        div_score = 5
         div_note  = "No dividend" if div_pct == 0 else f"Token yield {div_pct:.2f}% (not scored)"
 
-    # Analyst target signal
     if upside_pct is not None and upside_pct >= 15:
         pt_signal = f"UPSIDE +{upside_pct:.1f}% to consensus ${pt_mean:.0f}"
     elif upside_pct is not None and upside_pct >= 0:
@@ -599,7 +600,6 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
     if eg_pct is not None and eg_pct > 200:
         eg_score = min(eg_score, 6)
 
-    # 52W position: low % of range = better buy opportunity
     if wk52_hi and wk52_lo and wk52_hi > wk52_lo and price:
         pos_pct   = (price - wk52_lo) / (wk52_hi - wk52_lo) * 100
         pos_score = score_range(pos_pct, 30, 75, False)
@@ -608,24 +608,24 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
         pos_pct, pos_score, pos_note = None, 5, "N/A"
 
     criteria = [
-        {"name": "Valuation (P/E)",  "score": _pe_score,                                                        "note": pe_note},
-        {"name": "Price-to-Book",    "score": score_range(pb, 2, 50, False),                                    "note": f"P/B {pb:.2f}x" if pb else "N/A"},
-        {"name": "Margin-Adj P/S",   "score": score_range(ps, ps_good, ps_bad, False),                          "note": f"P/S {ps:.2f}x" if ps else "N/A"},
-        {"name": "EV / EBITDA",      "score": score_range(ev_ebitda, 8, 40, False),                             "note": f"EV/EBITDA {ev_ebitda:.1f}x" if ev_ebitda else "N/A"},
-        {"name": "Return on Equity", "score": score_range(roe_pct, 20, 0, True),                                "note": f"ROE {roe_pct:.1f}%" if roe_pct is not None else "N/A"},
-        {"name": "Gross Margin",     "score": score_range(gross_pct, gm_good, gm_bad, True),                    "note": f"{gross_pct:.1f}%" if gross_pct is not None else "N/A"},
-        {"name": "Net Margin",       "score": score_range(net_pct, 20, 3, True),                                "note": f"{net_pct:.1f}%" if net_pct is not None else "N/A"},
+        {"name": "Valuation (P/E)",  "score": _pe_score,                                       "note": pe_note},
+        {"name": "Price-to-Book",    "score": score_range(pb, 2, 50, False),                    "note": f"P/B {pb:.2f}x" if pb else "N/A"},
+        {"name": "Margin-Adj P/S",   "score": score_range(ps, ps_good, ps_bad, False),          "note": f"P/S {ps:.2f}x" if ps else "N/A"},
+        {"name": "EV / EBITDA",      "score": score_range(ev_ebitda, 8, 40, False),             "note": f"EV/EBITDA {ev_ebitda:.1f}x" if ev_ebitda else "N/A"},
+        {"name": "Return on Equity", "score": score_range(roe_pct, 20, 0, True),                "note": f"ROE {roe_pct:.1f}%" if roe_pct is not None else "N/A"},
+        {"name": "Gross Margin",     "score": score_range(gross_pct, gm_good, gm_bad, True),    "note": f"{gross_pct:.1f}%" if gross_pct is not None else "N/A"},
+        {"name": "Net Margin",       "score": score_range(net_pct, 20, 3, True),                "note": f"{net_pct:.1f}%" if net_pct is not None else "N/A"},
         {"name": "Earnings Growth",  "score": eg_score,
          "note": ((f"{eg_pct:+.1f}% TTM" + (" *one-time? (capped 6/10)" if eg_pct > 200 else ""))
                   if eg_pct is not None else "N/A")},
-        {"name": "Revenue Growth",   "score": score_range(rg_pct, 20, 0, True),                                 "note": f"{rg_pct:+.1f}% TTM" if rg_pct is not None else "N/A"},
-        {"name": "Dividend Safety",  "score": div_score,                                                         "note": div_note},
-        {"name": "52W Position",     "score": pos_score,                                                         "note": pos_note},
-        {"name": "Analyst Target",   "score": score_range(upside_pct, 15, -15, True), "weight": 2,              "note": pt_note},
+        {"name": "Revenue Growth",   "score": score_range(rg_pct, 20, 0, True),                 "note": f"{rg_pct:+.1f}% TTM" if rg_pct is not None else "N/A"},
+        {"name": "Dividend Safety",  "score": div_score,                                         "note": div_note},
+        {"name": "52W Position",     "score": pos_score,                                         "note": pos_note},
+        {"name": "Analyst Target",   "score": score_range(upside_pct, 15, -15, True), "weight": 2, "note": pt_note},
     ]
-    total    = sum(c["score"] * c.get("weight", 1) for c in criteria)
-    max_pts  = sum(10 * c.get("weight", 1) for c in criteria)
-    pct      = round(total / max_pts * 100)
+    total   = sum(c["score"] * c.get("weight", 1) for c in criteria)
+    max_pts = sum(10 * c.get("weight", 1) for c in criteria)
+    pct     = round(total / max_pts * 100)
     verdict = "BUY" if pct >= 70 else "HOLD" if pct >= 45 else "SELL"
     metrics = {
         "Price":          f"${price:.2f}",
@@ -652,85 +652,140 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
 def fetch_and_score(ticker, fh_key, av_key):
     ticker = ticker.strip().upper()
     dq = DataQuality()
-    q, err = fh_get("/quote", {"symbol": ticker, "token": fh_key})
-    if err or not q or not q.get("c") or q.get("c") == 0:
-        raise ValueError(f"No price data for '{ticker}' ({err or 'empty quote'})")
-    dq.ok("Finnhub")
-    price       = sf(q, "c")
-    change_pct  = sf(q, "dp")
-    prev_close  = sf(q, "pc")
-    price_warn  = None
-    if price and prev_close and prev_close > 0:
-        deviation = abs((price - prev_close) / prev_close * 100)
-        if deviation > 25:
-            price_warn = (f"Price ${price:.2f} deviates {deviation:.0f}% from prev close "
-                          f"${prev_close:.2f} — possible bad data")
-    pr, err = fh_get("/stock/profile2", {"symbol": ticker, "token": fh_key})
-    if err: dq.fail("FH-Profile", err)
-    pr = pr or {}
-    name     = pr.get("name") or ticker
-    industry = pr.get("finnhubIndustry") or "—"
-    exchange = pr.get("exchange") or "—"
-    av, err = av_get({"function": "OVERVIEW", "symbol": ticker, "apikey": av_key})
-    if err:
-        dq.fail("AlphaVantage", err)
-        av = {}
+
+    # ── PRIMARY: yfinance — one call gets everything ──────────────────────────
+    yf_info, yf_err = yf_get_all(ticker)
+
+    if not yf_info.get("price"):
+        # yfinance failed — try Finnhub for at least a price
+        q, fh_err = fh_get("/quote", {"symbol": ticker, "token": fh_key})
+        if fh_err or not q or not q.get("c") or q.get("c") == 0:
+            raise ValueError(
+                f"No price for '{ticker}' "
+                f"(yfinance: {yf_err or 'no price'} | Finnhub: {fh_err or 'empty'})")
+        dq.fail("yfinance", yf_err or "no price")
+        dq.ok("Finnhub")
+        price      = sf(q, "c")
+        change_pct = sf(q, "dp")
+        prev_close = sf(q, "pc")
     else:
-        dq.ok("AlphaVantage")
-    if not name or name == ticker: name = av.get("Name") or ticker
-    if exchange == "—": exchange = av.get("Exchange") or "—"
-    wk52_hi = sf(av, "52WeekHigh")
-    wk52_lo = sf(av, "52WeekLow")
-    av_mc   = sf(av, "MarketCapitalization")
-    mkt_cap_b = (av_mc / 1e9) if av_mc else None
-    db_entry = ETF_DB.get(ticker)
-    av_type  = str(av.get("AssetType", "")).upper()
-    is_etf   = (db_entry is not None or "ETF" in av_type or "FUND" in av_type)
+        dq.ok("yfinance")
+        price      = yf_info["price"]
+        change_pct = yf_info.get("change_pct")
+        prev_close = yf_info.get("prev_close")
+
+        # SECONDARY: Finnhub quote for fresher real-time price
+        q, _ = fh_get("/quote", {"symbol": ticker, "token": fh_key})
+        if q and sf(q, "c") and sf(q, "c") != 0:
+            dq.ok("Finnhub")
+            fh_price = sf(q, "c")
+            if fh_price:
+                price      = fh_price
+                change_pct = sf(q, "dp")
+                if sf(q, "pc"): prev_close = sf(q, "pc")
+
+    # Price sanity check
+    price_warn = None
+    if price and prev_close and prev_close > 0:
+        dev = abs((price - prev_close) / prev_close * 100)
+        if dev > 25:
+            price_warn = (f"Price ${price:.2f} deviates {dev:.0f}% from prev close "
+                          f"${prev_close:.2f} — possible stale data")
+
+    # Identity from yfinance
+    name      = yf_info.get("name") or ticker
+    yf_sector = yf_info.get("sector") or "—"
+    yf_ind    = yf_info.get("industry") or "—"
+    exchange  = yf_info.get("exchange") or "—"
+    mkt_cap_b = (yf_info["market_cap"] / 1e9) if yf_info.get("market_cap") else None
+    wk52_hi   = sf(yf_info, "52WeekHigh")
+    wk52_lo   = sf(yf_info, "52WeekLow")
+
+    # ETF detection
+    db_entry   = ETF_DB.get(ticker)
+    quote_type = (yf_info.get("asset_type") or "").upper()
+    is_etf     = (db_entry is not None or
+                  "ETF" in quote_type or "FUND" in quote_type)
+
     if is_etf:
-        yf_data, err = yf_get_etf(ticker)
-        if err:   dq.fail("yfinance", err);     yf_data = {}
-        elif yf_data.get("trailingPE"): dq.ok("yfinance")
+        yf_etf = {
+            "trailingPE":    yf_info.get("trailingPE"),
+            "totalAssets":   yf_info.get("totalAssets"),
+            "dividendYield": yf_info.get("DividendYield"),
+            "beta":          yf_info.get("beta"),
+            "52WeekHigh":    wk52_hi,
+            "52WeekLow":     wk52_lo,
+            "ytdReturn":     yf_info.get("ytdReturn"),
+        }
         if db_entry is None:
             db_entry = {"expense": None, "num_holdings": 0,
-                        "category": av.get("Industry") or industry or "ETF"}
+                        "category": yf_sector or "ETF"}
             dq.fail("ETF_DB", "not in built-in database")
         criteria, metrics, verdict, pct = score_etf(
-            ticker, price, wk52_hi, wk52_lo, db_entry, av, yf_data, dq)
+            ticker, price, wk52_hi, wk52_lo, db_entry, {}, yf_etf, dq)
         asset_type = "ETF"
-        sector     = db_entry.get("category", industry)
+        sector_out = db_entry.get("category", yf_sector)
     else:
-        if not av:
-            yf_stock, yf_err = yf_get_stock(ticker)
-            if yf_err: dq.fail("yfinance-stock", yf_err)
-            else:
-                av = yf_stock
-                dq.ok("yfinance-stock")
-                if not wk52_hi: wk52_hi = sf(av, "52WeekHigh")
-                if not wk52_lo: wk52_lo = sf(av, "52WeekLow")
-        pt_data, pt_err = fh_price_target(ticker, fh_key)
-        if pt_err: dq.fail("PriceTarget", pt_err)
-        else:      dq.ok("PriceTarget")
+        dq.ok("Fundamentals")
+        # Map yf_info fields to AV-compatible names expected by score_stock()
+        av_compat = {k: yf_info.get(k) for k in (
+            "TrailingPE", "ForwardPE", "PriceToBookRatio", "PriceToSalesRatioTTM",
+            "EVToEBITDA", "ReturnOnEquityTTM", "ProfitMargin", "OperatingMarginTTM",
+            "_grossMargins", "GrossProfitTTM", "RevenueTTM",
+            "QuarterlyEarningsGrowthYOY", "QuarterlyRevenueGrowthYOY",
+            "DividendYield", "PayoutRatio", "52WeekHigh", "52WeekLow")}
+
+        # Analyst target embedded in yfinance info
+        pt_mean = yf_info.get("targetMeanPrice")
+        if pt_mean and float(pt_mean) > 0:
+            pt_data = {"mean": float(pt_mean),
+                       "high": yf_info.get("targetHighPrice"),
+                       "low":  yf_info.get("targetLowPrice")}
+            dq.ok("PriceTarget")
+        else:
+            pt_data = None
+            dq.fail("PriceTarget", "no analyst target from yfinance")
+
+        # Pass combined sector+industry string for better tier keyword matching
+        sector_str = f"{yf_sector} {yf_ind}"
         criteria, metrics, verdict, pct = score_stock(
-            ticker, price, wk52_hi, wk52_lo, av, dq, pt_data, sector=industry)
+            ticker, price, wk52_hi, wk52_lo, av_compat, dq, pt_data,
+            sector=sector_str)
         asset_type = "Stock"
-        sector     = industry
+        sector_out = yf_ind if yf_ind != "—" else yf_sector
+
     return {
         "ticker": ticker, "name": name, "type": asset_type,
-        "sector": sector, "exchange": exchange,
+        "sector": sector_out, "exchange": exchange,
         "price": price, "change_pct": change_pct, "price_warning": price_warn,
-        "year_high": wk52_hi, "year_low": wk52_lo,
-        "mkt_cap_b": mkt_cap_b,
+        "year_high": wk52_hi, "year_low": wk52_lo, "mkt_cap_b": mkt_cap_b,
         "metrics": metrics, "criteria": criteria,
-        "total": sum(c["score"] * c.get("weight", 1) for c in criteria),
+        "total":     sum(c["score"] * c.get("weight", 1) for c in criteria),
         "max_total": sum(10 * c.get("weight", 1) for c in criteria),
         "pct": pct, "verdict": verdict, "dq": dq,
     }
 
 
-# ── Cached wrapper — 30 min TTL avoids repeated API calls on page refresh ────
-@st.cache_data(ttl=1800, show_spinner=False)
+# ── Simple thread-safe cache (works reliably across parallel worker threads) ──
+_cache: dict = {}
+_cache_lock  = threading.Lock()
+_CACHE_TTL   = 1800  # 30 minutes
+
 def cached_fetch(ticker, fh_key, av_key):
-    return fetch_and_score(ticker, fh_key, av_key)
+    key = (ticker, fh_key, av_key)
+    with _cache_lock:
+        if key in _cache:
+            data, ts = _cache[key]
+            if time.time() - ts < _CACHE_TTL:
+                return data
+    data = fetch_and_score(ticker, fh_key, av_key)   # may raise
+    with _cache_lock:
+        _cache[key] = (data, time.time())
+    return data
+
+def clear_cache():
+    with _cache_lock:
+        _cache.clear()
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -790,26 +845,25 @@ def render_pt_signal(metrics):
     sig = metrics.get("_pt_signal")
     if not sig: return
     if sig.startswith("WARNING"):
-        st.markdown(f'<div class="danger-box">⚠️ {sig}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="danger-box">⚠️ {_html.escape(sig)}</div>', unsafe_allow_html=True)
     elif sig.startswith("CAUTION"):
-        st.markdown(f'<div class="warn-box">⚡ {sig}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="warn-box">⚡ {_html.escape(sig)}</div>', unsafe_allow_html=True)
     elif sig.startswith("UPSIDE"):
-        st.markdown(f'<div class="upside-box">↑ {sig}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="upside-box">↑ {_html.escape(sig)}</div>', unsafe_allow_html=True)
 
 def render_card(r):
-    v    = r["verdict"]
-    sc   = r["pct"]
-    cc   = score_color_class(sc)
-    chg  = r["change_pct"]
-    chg_str = f"{chg:+.2f}%" if chg is not None else "—"
+    v         = r["verdict"]
+    sc        = r["pct"]
+    cc        = score_color_class(sc)
+    chg       = r["change_pct"]
+    chg_str   = f"{chg:+.2f}%" if chg is not None else "—"
     chg_color = "#3fb950" if (chg or 0) >= 0 else "#ff7b72"
-    dq = r.get("dq")
-
+    dq        = r.get("dq")
     dq_quality  = dq.quality if dq else "?"
     price_warn  = r.get("price_warning")
     dq_warn = ""
     if price_warn:
-        dq_warn += (f'<div class="danger-box" style="margin-top:6px;">⚠ {_html.escape(price_warn)}</div>')
+        dq_warn += f'<div class="danger-box" style="margin-top:6px;">⚠ {_html.escape(price_warn)}</div>'
     if dq_quality in ("LOW", "MEDIUM"):
         dq_warn += (f'<div class="dq-warn-inline">⚠ Score based on partial data '
                     f'({_html.escape(dq.summary) if dq and dq.summary else "some sources unavailable"})'
@@ -839,7 +893,6 @@ def render_card(r):
         {dq_warn}
     </div>
     """, unsafe_allow_html=True)
-
     with st.expander("Details — criteria & metrics"):
         render_pt_signal(r["metrics"])
         render_criteria(r["criteria"])
@@ -864,7 +917,7 @@ if "tickers" not in st.session_state:
     else:
         st.session_state["tickers"] = DEFAULT_TICKERS
 
-# ── Ticker input ─────────────────────────────────────────────────────────────
+# ── Ticker input ──────────────────────────────────────────────────────────────
 with st.expander("⚙️ Portfolio settings", expanded="tickers" not in st.query_params):
     raw = st.text_area(
         "Tickers (one per line or comma-separated)",
@@ -877,9 +930,9 @@ with st.expander("⚙️ Portfolio settings", expanded="tickers" not in st.query
         run_btn = st.button("▶ Analyze", type="primary", use_container_width=True)
     with col2:
         save_btn = st.button("💾 Save", use_container_width=True,
-                             help="Save your ticker list to the URL so it loads automatically next time")
+                             help="Save your ticker list to the URL — bookmark it to restore on any device")
     with col3:
-        st.caption("Results cached 30 min · click Analyze to refresh")
+        st.caption("Results cached 30 min · Parallel fetch · click Analyze to refresh")
 
     if save_btn:
         tickers_to_save = [t.strip().upper() for t in raw.replace(",", "\n").splitlines() if t.strip()]
@@ -890,7 +943,7 @@ with st.expander("⚙️ Portfolio settings", expanded="tickers" not in st.query
 if run_btn:
     tickers = [t.strip().upper() for t in raw.replace(",", "\n").splitlines() if t.strip()]
     st.session_state["tickers"] = tickers
-    cached_fetch.clear()
+    clear_cache()
 
 tickers = st.session_state.get("tickers", DEFAULT_TICKERS)
 
@@ -898,20 +951,31 @@ if not tickers:
     st.info("Enter at least one ticker above and click Analyze.")
     st.stop()
 
-# ── Analysis ──────────────────────────────────────────────────────────────────
-results  = []
-errors   = []
-progress = st.progress(0, text="Starting analysis…")
+# ── Parallel analysis — all tickers fetched simultaneously ───────────────────
+results: list = []
+errors:  list = []
 
-for i, ticker in enumerate(tickers):
-    progress.progress((i) / len(tickers), text=f"Fetching {ticker}…")
-    try:
-        r = cached_fetch(ticker, FINNHUB_KEY, AV_KEY)
-        results.append(r)
-    except Exception as e:
-        errors.append((ticker, str(e)))
+progress    = st.progress(0, text="Starting analysis…")
+_done_count = [0]                        # list so closure can mutate it
+_done_lock  = threading.Lock()
 
-progress.progress(1.0, text="Done.")
+def _fetch_one(t):
+    return cached_fetch(t, FINNHUB_KEY, AV_KEY)
+
+with ThreadPoolExecutor(max_workers=8) as executor:
+    future_map = {executor.submit(_fetch_one, t): t for t in tickers}
+    for future in as_completed(future_map):
+        t = future_map[future]
+        with _done_lock:
+            _done_count[0] += 1
+            done = _done_count[0]
+        progress.progress(done / len(tickers),
+                          text=f"Analyzed {done}/{len(tickers)} — {t}")
+        try:
+            results.append(future.result())
+        except Exception as e:
+            errors.append((t, str(e)))
+
 progress.empty()
 
 # ── Summary bar ───────────────────────────────────────────────────────────────
@@ -921,24 +985,22 @@ if results:
     sells = sum(1 for r in results if r["verdict"] == "SELL")
     avg   = round(sum(r["pct"] for r in results) / len(results))
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Avg Score",  f"{avg}/100")
-    c2.metric("BUY",        buys,  delta=None)
-    c3.metric("HOLD",       holds, delta=None)
-    c4.metric("SELL",       sells, delta=None)
+    c1.metric("Avg Score", f"{avg}/100")
+    c2.metric("BUY",   buys)
+    c3.metric("HOLD",  holds)
+    c4.metric("SELL",  sells)
     st.markdown("---")
 
-# ── Split and sort: stocks and ETFs separately, BUY first then by score ───────
+# ── Split & sort: stocks BUY→score, ETFs BUY→score ───────────────────────────
 _sort_key = lambda r: ({"BUY": 0, "HOLD": 1, "SELL": 2}[r["verdict"]], -r["pct"])
 stocks = sorted([r for r in results if r["type"] == "Stock"], key=_sort_key)
 etfs   = sorted([r for r in results if r["type"] == "ETF"],   key=_sort_key)
 
-# ── Render stocks ─────────────────────────────────────────────────────────────
 if stocks:
     st.markdown("### 📊 Stocks")
     for r in stocks:
         render_card(r)
 
-# ── Render ETFs ───────────────────────────────────────────────────────────────
 if etfs:
     st.markdown("### 📦 ETFs")
     for r in etfs:
@@ -949,4 +1011,4 @@ for ticker, err in errors:
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("Data: Finnhub (price) · Alpha Vantage (fundamentals) · yfinance (targets, ETF metrics) · Scores cached 30 min")
+st.caption("Data: yfinance (fundamentals · targets · ETF metrics) · Finnhub (real-time price) · Scores cached 30 min")
