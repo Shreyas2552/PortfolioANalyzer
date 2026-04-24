@@ -6,10 +6,12 @@ Deploy:       push to GitHub → connect at share.streamlit.io
 Mobile:       open the Streamlit Cloud URL on any device
 
 Data architecture (v3 — yfinance-first):
-  PRIMARY  → yfinance  : price, fundamentals, targets, ETF data (free, no key)
-  SECONDARY → Finnhub  : real-time price quote only (free, fast)
-  REMOVED  → Alpha Vantage : was 13 s/ticker × N tickers = app timeout
-  PARALLEL → ThreadPoolExecutor : all tickers fetched simultaneously
+  PRIMARY    → yfinance      : price, fundamentals, targets, ETF data (free, no key)
+  SECONDARY  → Finnhub       : real-time price quote only (free, fast)
+  SUPPLEMENT → Alpha Vantage : called only when yfinance is missing DividendYield,
+                               TrailingPE, or < 3 of 5 key scoring fields; serialised
+                               at ≤5 req/min so it never blocks the parallel pool
+  PARALLEL   → ThreadPoolExecutor : all tickers fetched simultaneously
 """
 
 import time, warnings, requests, html as _html, threading
@@ -762,11 +764,18 @@ def fetch_and_score(ticker, fh_key, av_key):
             "DividendYield", "PayoutRatio", "52WeekHigh", "52WeekLow")}
 
         # ── AV supplement: fill None fields when yfinance coverage is incomplete ──
-        # Key scoring fields — if < 3 are populated, AV is worth calling
+        # Trigger AV when:
+        #   (a) fewer than 3 of 5 key scoring fields are populated, OR
+        #   (b) DividendYield is None  (yf misses ~40% of tickers with small dividends), OR
+        #   (c) TrailingPE is None     (yf occasionally misses this, e.g. F)
+        # Profitability metrics (GrossMargin/NetMargin/ROE/EPS/RevGrowth) are
+        # identical between AV and yfinance — no need to call AV for those.
         _KEY = ("TrailingPE", "EVToEBITDA", "ProfitMargin",
                 "_grossMargins", "QuarterlyEarningsGrowthYOY")
         _yf_coverage = sum(1 for f in _KEY if av_compat.get(f) is not None)
-        if _yf_coverage < 3 and av_key:
+        _needs_div_yield   = av_compat.get("DividendYield") is None
+        _needs_trailing_pe = av_compat.get("TrailingPE") is None
+        if (_yf_coverage < 3 or _needs_div_yield or _needs_trailing_pe) and av_key:
             av_raw, av_err = av_get({"function": "OVERVIEW",
                                      "symbol": ticker, "apikey": av_key})
             if av_raw and not av_err:
