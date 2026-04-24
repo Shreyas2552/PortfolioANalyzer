@@ -112,21 +112,25 @@ try:
 except Exception:
     FINNHUB_KEY = "d787fi1r01qsamsj83h0d787fi1r01qsamsj83hg"
 try:
-    AV_KEY = st.secrets["AV_KEY"]   # kept for forward compatibility, not actively used
+    AV_KEY = st.secrets["AV_KEY"]
 except Exception:
     AV_KEY = "DRFXF3KZF59XEVA4"
 
 # ── API / timing config ──────────────────────────────────────────────────────
 FH_BASE        = "https://finnhub.io/api/v1"
+AV_BASE        = "https://www.alphavantage.co/query"
 TIMEOUT        = 12
-FH_MIN_GAP     = 0.25   # minimum seconds between Finnhub calls (thread-safe enforced)
+FH_MIN_GAP     = 0.25   # min seconds between Finnhub calls
+AV_MIN_GAP     = 13.0   # AV free tier: 5 req/min → 12 s apart (13 s to be safe)
 YF_DELAY       = 0.15   # polite pause per yfinance call
 RETRY_ATTEMPTS = 2
 RETRY_BACKOFF  = 1.5
 
-# Thread-safe Finnhub rate limiter — serialises calls across parallel workers
+# Thread-safe rate limiters — serialise API calls across parallel workers
 _fh_lock   = threading.Lock()
 _fh_last_t = [0.0]
+_av_lock   = threading.Lock()
+_av_last_t = [0.0]
 
 # ── Default portfolio ────────────────────────────────────────────────────────
 DEFAULT_TICKERS = ["NVDA", "AMZN", "GOOGL", "GEV", "CAT", "F", "PCAR", "JEPQ", "VUG"]
@@ -224,11 +228,33 @@ def fh_get(path, params):
     return None, "Max retries exceeded"
 
 
+def av_get(params):
+    """
+    Alpha Vantage GET — thread-safe rate-limited (5 req/min free tier).
+    Used as a selective supplement when yfinance returns incomplete data.
+    """
+    with _av_lock:
+        gap = AV_MIN_GAP - (time.time() - _av_last_t[0])
+        if gap > 0:
+            time.sleep(gap)
+        _av_last_t[0] = time.time()
+    try:
+        r = requests.get(AV_BASE, params=params, timeout=TIMEOUT)
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+        data = r.json()
+        if "Note"        in data: return None, "AV rate limit"
+        if "Information" in data: return None, "AV key error"
+        if not data:              return None, "AV empty response"
+        return data, None
+    except Exception as e:
+        return None, str(e)[:80]
+
+
 def yf_get_all(ticker):
     """
     Primary data source — ONE yfinance call returns everything:
     price, fundamentals, analyst targets, ETF metrics, sector info.
-    Replaces av_get + yf_get_etf + yf_get_stock + fh_price_target.
     """
     if not YF_AVAILABLE:
         return {}, "yfinance not installed"
@@ -734,6 +760,45 @@ def fetch_and_score(ticker, fh_key, av_key):
             "_grossMargins", "GrossProfitTTM", "RevenueTTM",
             "QuarterlyEarningsGrowthYOY", "QuarterlyRevenueGrowthYOY",
             "DividendYield", "PayoutRatio", "52WeekHigh", "52WeekLow")}
+
+        # ── AV supplement: fill None fields when yfinance coverage is incomplete ──
+        # Key scoring fields — if < 3 are populated, AV is worth calling
+        _KEY = ("TrailingPE", "EVToEBITDA", "ProfitMargin",
+                "_grossMargins", "QuarterlyEarningsGrowthYOY")
+        _yf_coverage = sum(1 for f in _KEY if av_compat.get(f) is not None)
+        if _yf_coverage < 3 and av_key:
+            av_raw, av_err = av_get({"function": "OVERVIEW",
+                                     "symbol": ticker, "apikey": av_key})
+            if av_raw and not av_err:
+                dq.ok("AlphaVantage")
+                # Fill only fields that yfinance returned None for
+                _AV_MAP = {
+                    "TrailingPE":               "TrailingPE",
+                    "ForwardPE":                "ForwardPE",
+                    "PriceToBookRatio":         "PriceToBookRatio",
+                    "PriceToSalesRatioTTM":     "PriceToSalesRatioTTM",
+                    "EVToEBITDA":               "EVToEBITDA",
+                    "ReturnOnEquityTTM":        "ReturnOnEquityTTM",
+                    "ProfitMargin":             "ProfitMargin",
+                    "OperatingMarginTTM":       "OperatingMarginTTM",
+                    "GrossProfitTTM":           "GrossProfitTTM",
+                    "RevenueTTM":               "RevenueTTM",
+                    "QuarterlyEarningsGrowthYOY": "QuarterlyEarningsGrowthYOY",
+                    "QuarterlyRevenueGrowthYOY":  "QuarterlyRevenueGrowthYOY",
+                    "DividendYield":            "DividendYield",
+                    "PayoutRatio":              "PayoutRatio",
+                    "52WeekHigh":               "52WeekHigh",
+                    "52WeekLow":                "52WeekLow",
+                }
+                for compat_key, av_key_name in _AV_MAP.items():
+                    if av_compat.get(compat_key) is None:
+                        v = sf(av_raw, av_key_name)
+                        if v is not None:
+                            av_compat[compat_key] = v
+                if not wk52_hi: wk52_hi = sf(av_raw, "52WeekHigh")
+                if not wk52_lo: wk52_lo = sf(av_raw, "52WeekLow")
+            else:
+                dq.fail("AlphaVantage", av_err or "no data")
 
         # Analyst target embedded in yfinance info
         pt_mean = yf_info.get("targetMeanPrice")
