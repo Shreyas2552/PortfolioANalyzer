@@ -12,6 +12,50 @@ Data architecture (v3 — yfinance-first):
                                TrailingPE, or < 3 of 5 key scoring fields; serialised
                                at ≤5 req/min so it never blocks the parallel pool
   PARALLEL   → ThreadPoolExecutor : all tickers fetched simultaneously
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CHANGE HISTORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  [2026-04-28] v3.1 — Performance & UX improvements
+    CHANGED : Moved _TIER_OVERRIDES, _TECH, _IND keyword tuples from inside
+              score_stock() to module level — were being rebuilt on every ticker
+              fetch call (wasted CPU on every parallel worker invocation).
+    ADDED   : "Last analyzed" datetime stamp in the summary bar so users know
+              exactly how fresh the displayed scores are.
+    ADDED   : Live ticker count in the Portfolio Settings expander label so
+              users can see how many tickers are loaded without opening it.
+
+  [2026-04-28] v3.2 — Named portfolios + data accuracy
+    ADDED   : Multiple named portfolios — save up to N named sets via the
+              "Save as" field; all portfolios encoded in URL param `saved`
+              so one bookmarked URL restores every saved portfolio.
+    ADDED   : Portfolio switcher dropdown — select any saved portfolio to
+              load its tickers instantly.
+    ADDED   : Delete button removes the currently selected named portfolio.
+    ADDED   : Auto-sync URL on Analyze — clicking Analyze now also writes
+              current tickers to ?t= so URL always reflects what is shown.
+    ADDED   : Data accuracy % per ticker — counts what fraction of scoring
+              criteria have real (non-N/A) data; shown on each score card
+              and broken down by source in the Details expander.
+
+  [2026-04-28] v3.3 — Analyze on demand only + cross-platform save
+    FIXED   : Analysis no longer runs automatically on every Streamlit rerun
+              (portfolio switch, save, text edit). Results are now stored in
+              session_state and only re-fetched when the user clicks Analyze.
+    ADDED   : "Click Analyze" placeholder on first load so the page does not
+              immediately fire 9 API calls before the user is ready.
+    DEPLOY  : Push to GitHub + connect at share.streamlit.io for a permanent
+              public URL. Portfolio saves (URL params ?t= and ?saved=) work
+              identically on cloud — bookmark the URL to restore everything.
+
+  TODO / NEXT STEPS
+    - [ ] Add sparkline price chart (30-day) inside each score card expander
+    - [ ] Add portfolio-level sector allocation pie chart below summary bar
+    - [ ] Export to CSV button (scores + metrics for all tickers)
+    - [ ] Add Streamlit Cloud secrets instructions to README
+    - [ ] Consider caching yfinance calls to disk (joblib) so Analyze is instant
+          on second run within same session
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import time, warnings, requests, html as _html, threading
@@ -178,6 +222,69 @@ ETF_DB = {
     "VNQ":  {"expense":0.13,  "num_holdings":160,  "category":"US REITs",              "multi_class_aum":True, "beta_fallback":0.85},
     "ARKK": {"expense":0.75,  "num_holdings":30,   "category":"Disruptive Innovation", "beta_fallback":1.55},
 }
+
+
+# ── Sector-tier classification constants (module-level — shared across calls) ─
+_TIER_OVERRIDES = {
+    # E-commerce / marketplace
+    "AMZN":"Tech","SHOP":"Tech","EBAY":"Tech","ETSY":"Tech","MELI":"Tech",
+    "JD":"Tech","PDD":"Tech","SE":"Tech",
+    # Streaming / gaming
+    "NFLX":"Tech","SPOT":"Tech","RBLX":"Tech","EA":"Tech","TTWO":"Tech",
+    "ATVI":"Tech","MTCH":"Tech",
+    # Mobility / gig economy
+    "UBER":"Tech","LYFT":"Tech","DASH":"Tech","ABNB":"Tech",
+    # Online travel
+    "BKNG":"Tech","EXPE":"Tech","TRIP":"Tech",
+    # Fintech / payments
+    "PYPL":"Tech","SQ":"Tech","COIN":"Tech","SOFI":"Tech","AFRM":"Tech",
+    "UPST":"Tech","HOOD":"Tech","NU":"Tech","BILL":"Tech","FOUR":"Tech",
+    # Payment networks
+    "V":"Tech","MA":"Tech","FISV":"Tech","FIS":"Tech","GPN":"Tech",
+    "ADP":"Tech","PAYX":"Tech",
+    # Healthcare SaaS
+    "VEEV":"Tech","TDOC":"Tech","HIMS":"Tech","DOCS":"Tech",
+    # EVs with software premium
+    "TSLA":"Tech","RIVN":"Tech","LCID":"Tech",
+    # Communication services → Tech scoring
+    "GOOGL":"Tech","GOOG":"Tech","META":"Tech","SNAP":"Tech","PINS":"Tech",
+    "ZM":"Tech","TWLO":"Tech","DDOG":"Tech",
+    # Media/Entertainment → Default (NOT pure tech, lower margins)
+    "DIS":"Default","CMCSA":"Default","CHTR":"Default",
+    "T":"Default","VZ":"Default","WBD":"Default","FOX":"Default","PARA":"Default",
+    # Telecom → Default
+    "TMUS":"Default",
+    # Heavy industrials
+    "PCAR":"Industrial","AGCO":"Industrial","OSK":"Industrial",
+    "CMI":"Industrial","GNRC":"Industrial",
+    # Aerospace / defense
+    "GD":"Industrial","NOC":"Industrial","HII":"Industrial",
+    "TDG":"Industrial","HEI":"Industrial","LMT":"Industrial","RTX":"Industrial",
+    "BA":"Industrial","HWM":"Industrial",
+    # Energy equipment
+    "HAL":"Industrial","BKR":"Industrial","SLB":"Industrial",
+    # Renewables manufacturing
+    "FSLR":"Industrial","RUN":"Industrial",
+    # Power / electrical
+    "GEV":"Industrial","ETN":"Industrial","ACHR":"Industrial",
+    "EMR":"Industrial","ROK":"Industrial","AME":"Industrial",
+    # Automakers (yfinance sector = "Consumer Cyclical" — override to Industrial)
+    "F":"Industrial","GM":"Industrial","STLA":"Industrial",
+    "TM":"Industrial","HMC":"Industrial","NSANY":"Industrial",
+    # Solar semiconductors scored as Tech
+    "ENPH":"Tech","SEDG":"Tech",
+}
+_TECH_KEYWORDS = (
+    "technology","semiconductor","software","internet","cloud","saas",
+    "artificial intelligence","communication services","interactive",
+    "e-commerce","electronic","information technology",
+)
+_IND_KEYWORDS = (
+    "capital goods","industrials","industrial","automobile","auto manufacturer",
+    "transportation","energy","manufacturing","machinery","defense",
+    "aerospace","electrical","power","oil","mining","construction",
+    "steel","chemical","farm","heavy equipment","truck",
+)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -503,68 +610,12 @@ def score_stock(ticker, price, wk52_hi, wk52_lo, av, dq, pt_data=None, sector=""
     op_m      = sf(av, "OperatingMarginTTM")
     op_pct    = op_m * 100 if op_m is not None else None
 
-    _TIER_OVERRIDES = {
-        # E-commerce / marketplace
-        "AMZN":"Tech","SHOP":"Tech","EBAY":"Tech","ETSY":"Tech","MELI":"Tech",
-        "JD":"Tech","PDD":"Tech","SE":"Tech",
-        # Streaming / gaming
-        "NFLX":"Tech","SPOT":"Tech","RBLX":"Tech","EA":"Tech","TTWO":"Tech",
-        "ATVI":"Tech","MTCH":"Tech",
-        # Mobility / gig economy
-        "UBER":"Tech","LYFT":"Tech","DASH":"Tech","ABNB":"Tech",
-        # Online travel
-        "BKNG":"Tech","EXPE":"Tech","TRIP":"Tech",
-        # Fintech / payments
-        "PYPL":"Tech","SQ":"Tech","COIN":"Tech","SOFI":"Tech","AFRM":"Tech",
-        "UPST":"Tech","HOOD":"Tech","NU":"Tech","BILL":"Tech","FOUR":"Tech",
-        # Payment networks
-        "V":"Tech","MA":"Tech","FISV":"Tech","FIS":"Tech","GPN":"Tech",
-        "ADP":"Tech","PAYX":"Tech",
-        # Healthcare SaaS
-        "VEEV":"Tech","TDOC":"Tech","HIMS":"Tech","DOCS":"Tech",
-        # EVs with software premium
-        "TSLA":"Tech","RIVN":"Tech","LCID":"Tech",
-        # Communication services → Tech scoring
-        "GOOGL":"Tech","GOOG":"Tech","META":"Tech","SNAP":"Tech","PINS":"Tech",
-        "ZM":"Tech","TWLO":"Tech","DDOG":"Tech",
-        # Media/Entertainment → Default (NOT pure tech, lower margins)
-        "DIS":"Default","CMCSA":"Default","CHTR":"Default",
-        "T":"Default","VZ":"Default","WBD":"Default","FOX":"Default","PARA":"Default",
-        # Telecom → Default
-        "TMUS":"Default",
-        # Heavy industrials
-        "PCAR":"Industrial","AGCO":"Industrial","OSK":"Industrial",
-        "CMI":"Industrial","GNRC":"Industrial",
-        # Aerospace / defense
-        "GD":"Industrial","NOC":"Industrial","HII":"Industrial",
-        "TDG":"Industrial","HEI":"Industrial","LMT":"Industrial","RTX":"Industrial",
-        "BA":"Industrial","HWM":"Industrial",
-        # Energy equipment
-        "HAL":"Industrial","BKR":"Industrial","SLB":"Industrial",
-        # Renewables manufacturing
-        "FSLR":"Industrial","RUN":"Industrial",
-        # Power / electrical
-        "GEV":"Industrial","ETN":"Industrial","ACHR":"Industrial",
-        "EMR":"Industrial","ROK":"Industrial","AME":"Industrial",
-        # Automakers (yfinance sector = "Consumer Cyclical" — override to Industrial)
-        "F":"Industrial","GM":"Industrial","STLA":"Industrial",
-        "TM":"Industrial","HMC":"Industrial","NSANY":"Industrial",
-        # Solar semiconductors scored as Tech
-        "ENPH":"Tech","SEDG":"Tech",
-    }
     sec_lower = (sector or "").lower()
     _override = _TIER_OVERRIDES.get(ticker.upper() if ticker else "")
-    _TECH = ("technology","semiconductor","software","internet","cloud","saas",
-             "artificial intelligence","communication services","interactive",
-             "e-commerce","electronic","information technology")
-    _IND  = ("capital goods","industrials","industrial","automobile","auto manufacturer",
-             "transportation","energy","manufacturing","machinery","defense",
-             "aerospace","electrical","power","oil","mining","construction",
-             "steel","chemical","farm","heavy equipment","truck")
 
-    if _override == "Tech" or (not _override and any(x in sec_lower for x in _TECH)):
+    if _override == "Tech" or (not _override and any(x in sec_lower for x in _TECH_KEYWORDS)):
         pe_good, pe_bad, gm_good, gm_bad, tier_label = 18, 60, 65, 25, "Tech" + (" (override)" if _override else "")
-    elif _override == "Industrial" or (not _override and any(x in sec_lower for x in _IND)):
+    elif _override == "Industrial" or (not _override and any(x in sec_lower for x in _IND_KEYWORDS)):
         pe_good, pe_bad, gm_good, gm_bad, tier_label = 10, 28, 35, 5,  "Industrial" + (" (override)" if _override else "")
     elif _override == "Default":
         pe_good, pe_bad, gm_good, gm_bad, tier_label = 13, 38, 55, 15, "Default (override)"
@@ -837,6 +888,7 @@ def fetch_and_score(ticker, fh_key, av_key):
         "total":     sum(c["score"] * c.get("weight", 1) for c in criteria),
         "max_total": sum(10 * c.get("weight", 1) for c in criteria),
         "pct": pct, "verdict": verdict, "dq": dq,
+        "field_accuracy": _field_accuracy(criteria),
     }
 
 
@@ -860,6 +912,37 @@ def cached_fetch(ticker, fh_key, av_key):
 def clear_cache():
     with _cache_lock:
         _cache.clear()
+
+
+def _encode_portfolios(portfolios: dict) -> str:
+    """Encode {name: [tickers]} → 'Name1:T1,T2|Name2:T3,T4' for URL storage."""
+    return "|".join(
+        f"{name}:{','.join(tickers)}"
+        for name, tickers in portfolios.items()
+        if name and tickers
+    )
+
+def _decode_portfolios(s: str) -> dict:
+    """Decode 'Name1:T1,T2|Name2:T3,T4' → {name: [tickers]}."""
+    result = {}
+    for part in (s or "").split("|"):
+        if ":" in part:
+            name, tickers_str = part.split(":", 1)
+            name = name.strip()
+            tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
+            if name and tickers:
+                result[name] = tickers
+    return result
+
+def _field_accuracy(criteria) -> int:
+    """Return % of criteria rows that have real data (note is not N/A)."""
+    if not criteria:
+        return 0
+    populated = sum(
+        1 for c in criteria
+        if c.get("note") and str(c["note"]).strip() not in ("N/A", "", "None")
+    )
+    return round(populated / len(criteria) * 100)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -926,14 +1009,16 @@ def render_pt_signal(metrics):
         st.markdown(f'<div class="upside-box">↑ {_html.escape(sig)}</div>', unsafe_allow_html=True)
 
 def render_card(r):
-    v         = r["verdict"]
-    sc        = r["pct"]
-    cc        = score_color_class(sc)
-    chg       = r["change_pct"]
-    chg_str   = f"{chg:+.2f}%" if chg is not None else "—"
-    chg_color = "#3fb950" if (chg or 0) >= 0 else "#ff7b72"
-    dq        = r.get("dq")
+    v           = r["verdict"]
+    sc          = r["pct"]
+    cc          = score_color_class(sc)
+    chg         = r["change_pct"]
+    chg_str     = f"{chg:+.2f}%" if chg is not None else "—"
+    chg_color   = "#3fb950" if (chg or 0) >= 0 else "#ff7b72"
+    dq          = r.get("dq")
     dq_quality  = dq.quality if dq else "?"
+    acc         = r.get("field_accuracy", 0)
+    acc_color   = "#3fb950" if acc >= 80 else "#d29922" if acc >= 50 else "#ff7b72"
     price_warn  = r.get("price_warning")
     dq_warn = ""
     if price_warn:
@@ -962,18 +1047,41 @@ def render_card(r):
         <div style="margin-top:10px; font-size:0.78rem; color:#8b949e;">
             <b style="color:#c9d1d9;">${r['price']:.2f}</b>
             &nbsp;·&nbsp; Data {dq_badge(dq_quality)}
+            &nbsp;·&nbsp; <span style="color:{acc_color}; font-weight:600;">{acc}% accuracy</span>
             {sector_html}
         </div>
         {dq_warn}
     </div>
     """, unsafe_allow_html=True)
-    with st.expander("Details — criteria & metrics"):
+    with st.expander("Details — criteria, metrics & data sources"):
         render_pt_signal(r["metrics"])
         render_criteria(r["criteria"])
         st.markdown("---")
         render_metrics(r["metrics"])
-        if dq and dq.summary:
-            st.caption(f"⚠ {dq.summary}")
+        # ── Data source breakdown ─────────────────────────────────────────────
+        if dq:
+            ok_parts   = "".join(
+                f'<span class="metric-chip" style="border-color:#1a4731;">'
+                f'<b style="color:#3fb950;">✓</b> {_html.escape(s)}</span>'
+                for s in dq.sources_ok
+            )
+            fail_parts = "".join(
+                f'<span class="metric-chip" style="border-color:#4a1515;">'
+                f'<b style="color:#ff7b72;">✗</b> {_html.escape(n)}</span>'
+                for n in dq.notes
+            )
+            acc_bar_color = acc_color
+            st.markdown(
+                f'<div style="margin-top:8px; font-size:0.78rem; color:#8b949e;">'
+                f'<b style="color:#c9d1d9;">Data sources</b>&nbsp; {ok_parts}{fail_parts}'
+                f'</div>'
+                f'<div style="margin-top:6px; font-size:0.78rem; color:#8b949e;">'
+                f'<b style="color:#c9d1d9;">Field accuracy</b>&nbsp;'
+                f'<span style="color:{acc_bar_color}; font-weight:700;">{acc}%</span>'
+                f' of scoring fields have live data'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -983,16 +1091,36 @@ def render_card(r):
 st.markdown("## 📈 Portfolio Analyzer")
 st.markdown('<p style="color:#8b949e; margin-top:-12px; font-size:0.9rem;">Live fundamental scoring · Analyst targets · Sector-aware valuation</p>', unsafe_allow_html=True)
 
-# ── Load saved tickers from URL on first visit ────────────────────────────────
+# ── Load state from URL on first visit ───────────────────────────────────────
 if "tickers" not in st.session_state:
     saved = st.query_params.get("t", "")
-    if saved:
-        st.session_state["tickers"] = [t.strip().upper() for t in saved.split(",") if t.strip()]
-    else:
-        st.session_state["tickers"] = DEFAULT_TICKERS
+    st.session_state["tickers"] = (
+        [t.strip().upper() for t in saved.split(",") if t.strip()]
+        if saved else DEFAULT_TICKERS
+    )
+if "saved_portfolios" not in st.session_state:
+    st.session_state["saved_portfolios"] = _decode_portfolios(
+        st.query_params.get("saved", "")
+    )
+
+# ── Portfolio switcher ────────────────────────────────────────────────────────
+_saved = st.session_state["saved_portfolios"]
+if _saved:
+    _options = ["— current tickers —"] + list(_saved.keys())
+    _choice  = st.selectbox(
+        "📁 Saved portfolios",
+        _options,
+        key="portfolio_choice",
+        help="Select a saved portfolio to load it into the ticker list",
+    )
+    if _choice != "— current tickers —" and _choice in _saved:
+        # Load the chosen portfolio into session state and URL
+        st.session_state["tickers"] = _saved[_choice]
+        st.query_params["t"] = ",".join(_saved[_choice])
 
 # ── Ticker input ──────────────────────────────────────────────────────────────
-with st.expander("⚙️ Portfolio settings", expanded="tickers" not in st.query_params):
+_ticker_count = len(st.session_state.get("tickers", DEFAULT_TICKERS))
+with st.expander(f"⚙️ Portfolio settings — {_ticker_count} ticker{'s' if _ticker_count != 1 else ''}", expanded="tickers" not in st.query_params):
     raw = st.text_area(
         "Tickers (one per line or comma-separated)",
         value="\n".join(st.session_state.get("tickers", DEFAULT_TICKERS)),
@@ -1002,55 +1130,84 @@ with st.expander("⚙️ Portfolio settings", expanded="tickers" not in st.query
     col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
         run_btn = st.button("▶ Analyze", type="primary", use_container_width=True)
-    with col2:
-        save_btn = st.button("💾 Save", use_container_width=True,
-                             help="Save your ticker list to the URL — bookmark it to restore on any device")
     with col3:
         st.caption("Results cached 30 min · Parallel fetch · click Analyze to refresh")
 
-    if save_btn:
-        tickers_to_save = [t.strip().upper() for t in raw.replace(",", "\n").splitlines() if t.strip()]
-        st.session_state["tickers"] = tickers_to_save
-        st.query_params["t"] = ",".join(tickers_to_save)
-        st.success("✓ Saved! Bookmark this page URL to restore your portfolio on any device.", icon="🔖")
+    st.divider()
+    st.markdown('<span style="font-size:0.82rem; color:#8b949e;">💾 Save current tickers as a named portfolio</span>', unsafe_allow_html=True)
+    sc1, sc2, sc3 = st.columns([3, 1, 1])
+    with sc1:
+        _save_name = st.text_input("Portfolio name", placeholder="e.g. Tech Growth",
+                                   key="save_name_input", label_visibility="collapsed")
+    with sc2:
+        _save_btn = st.button("Save", use_container_width=True, key="save_named_btn")
+    with sc3:
+        _active_choice = st.session_state.get("portfolio_choice", "— current tickers —")
+        _delete_btn = st.button("Delete", use_container_width=True, key="delete_portfolio_btn",
+                                disabled=(_active_choice == "— current tickers —" or _active_choice not in _saved))
+
+    if _save_btn and _save_name.strip():
+        _tickers_now = [t.strip().upper() for t in raw.replace(",", "\n").splitlines() if t.strip()]
+        _saved[_save_name.strip()] = _tickers_now
+        st.session_state["saved_portfolios"] = _saved
+        st.session_state["tickers"] = _tickers_now
+        st.query_params["t"]     = ",".join(_tickers_now)
+        st.query_params["saved"] = _encode_portfolios(_saved)
+        st.success(f"✓ Saved as '{_save_name.strip()}' — bookmark this URL to restore it.", icon="🔖")
+
+    if _delete_btn and _active_choice in _saved:
+        del _saved[_active_choice]
+        st.session_state["saved_portfolios"] = _saved
+        st.query_params["saved"] = _encode_portfolios(_saved)
+        st.rerun()
 
 if run_btn:
     tickers = [t.strip().upper() for t in raw.replace(",", "\n").splitlines() if t.strip()]
+    if not tickers:
+        st.warning("Enter at least one ticker first.")
+        st.stop()
     st.session_state["tickers"] = tickers
+    st.query_params["t"] = ",".join(tickers)
     clear_cache()
 
-tickers = st.session_state.get("tickers", DEFAULT_TICKERS)
+    # ── Parallel analysis — only runs when ▶ Analyze is clicked ──────────────
+    _results: list = []
+    _errors:  list = []
+    progress    = st.progress(0, text="Starting analysis…")
+    _done_count = [0]
+    _done_lock  = threading.Lock()
 
-if not tickers:
-    st.info("Enter at least one ticker above and click Analyze.")
+    def _fetch_one(t):
+        return cached_fetch(t, FINNHUB_KEY, AV_KEY)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_map = {executor.submit(_fetch_one, t): t for t in tickers}
+        for future in as_completed(future_map):
+            t = future_map[future]
+            with _done_lock:
+                _done_count[0] += 1
+                done = _done_count[0]
+            progress.progress(done / len(tickers),
+                              text=f"Analyzed {done}/{len(tickers)} — {t}")
+            try:
+                _results.append(future.result())
+            except Exception as e:
+                _errors.append((t, str(e)))
+
+    progress.empty()
+    import datetime as _dt
+    st.session_state["results"]     = _results
+    st.session_state["errors"]      = _errors
+    st.session_state["analyzed_at"] = _dt.datetime.now().strftime("%b %d %H:%M")
+
+# ── Show placeholder until user clicks Analyze ────────────────────────────────
+if "results" not in st.session_state:
+    st.info("👆 Enter your tickers above and click **▶ Analyze** to score your portfolio.")
     st.stop()
 
-# ── Parallel analysis — all tickers fetched simultaneously ───────────────────
-results: list = []
-errors:  list = []
-
-progress    = st.progress(0, text="Starting analysis…")
-_done_count = [0]                        # list so closure can mutate it
-_done_lock  = threading.Lock()
-
-def _fetch_one(t):
-    return cached_fetch(t, FINNHUB_KEY, AV_KEY)
-
-with ThreadPoolExecutor(max_workers=8) as executor:
-    future_map = {executor.submit(_fetch_one, t): t for t in tickers}
-    for future in as_completed(future_map):
-        t = future_map[future]
-        with _done_lock:
-            _done_count[0] += 1
-            done = _done_count[0]
-        progress.progress(done / len(tickers),
-                          text=f"Analyzed {done}/{len(tickers)} — {t}")
-        try:
-            results.append(future.result())
-        except Exception as e:
-            errors.append((t, str(e)))
-
-progress.empty()
+results     = st.session_state["results"]
+errors      = st.session_state["errors"]
+_analyzed_at = st.session_state.get("analyzed_at", "—")
 
 # ── Summary bar ───────────────────────────────────────────────────────────────
 if results:
@@ -1058,11 +1215,12 @@ if results:
     holds = sum(1 for r in results if r["verdict"] == "HOLD")
     sells = sum(1 for r in results if r["verdict"] == "SELL")
     avg   = round(sum(r["pct"] for r in results) / len(results))
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Avg Score", f"{avg}/100")
     c2.metric("BUY",   buys)
     c3.metric("HOLD",  holds)
     c4.metric("SELL",  sells)
+    c5.metric("As of", _analyzed_at)
     st.markdown("---")
 
 # ── Split & sort: stocks BUY→score, ETFs BUY→score ───────────────────────────
